@@ -10,7 +10,16 @@ uv sync
 uv run uvicorn app.main:app --reload
 ```
 
-Demo pages: `/static/chat.html` (patient), `/static/review.html` (clinician).
+By default the app runs at `http://127.0.0.1:8000`. Core URLs:
+
+| URL | Purpose |
+| --- | --- |
+| `/health` | Health check — returns `{"status": "ok"}` |
+| `/static/chat.html` | Patient-side chat demo |
+| `/static/review.html` | Clinician review queue demo |
+| `/docs` | Auto-generated Swagger UI |
+
+Note: `/` has no route defined and will return a 404 (`{"detail":"Not Found"}`) — use one of the URLs above.
 
 ## Tests
 
