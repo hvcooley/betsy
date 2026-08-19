@@ -15,28 +15,30 @@ purpose before designing from scratch.
 ## Commands
 
 ```bash
-cp .env.example .env          # fill in ANTHROPIC_API_KEY
-uv sync                       # install deps
+uv sync                                # install deps
 uv run uvicorn app.main:app --reload   # run dev server (http://127.0.0.1:8000)
-uv run pytest                 # run all tests
-uv run pytest tests/test_health.py::test_health   # run a single test
+uv run pytest                          # run all tests
 ```
 
-Migrations (Alembic, configured against `app.db.models.Base.metadata`):
-```bash
-uv run alembic revision --autogenerate -m "message"
-uv run alembic upgrade head
-```
+See README.md for full setup instructions and migration commands.
 
-Core URLs once running:
-| URL | Purpose |
+## MVP scope
+
+| Capability | Notes |
 | --- | --- |
-| `/health` | Health check |
-| `/static/chat.html` | Patient-side chat demo |
-| `/static/review.html` | Clinician review queue demo |
-| `/docs` | Swagger UI |
+| Text-based post-op follow-up conversation | Patient types, BETSY responds |
+| Deterministic conversation protocol | Anesthesia-specific script, versioned, data-driven |
+| Structured extraction per turn | Pain scores, symptoms, med adherence, red flags |
+| Deterministic red-flag rule engine | Escalation decisions are code, not LLM judgment |
+| Templated escalation messages | Zero-hallucination on the highest-liability output |
+| Stored transcript + structured findings | Full audit trail |
+| One-line summary header + triage tier | Feeds the future review dashboard |
+| Offline eval harness | Simulated patients, regression assertions, red-flag recall metrics |
+| Minimal review API + thin demo UI | Two static pages, no build step |
 
-Note: `/` has no route and returns 404 — use one of the URLs above.
+Anything not on this list (e.g. voice/multi-channel intake, LLM-driven escalation judgment,
+a full review dashboard beyond the static demo pages) is out of scope unless the user says
+otherwise.
 
 ## Architecture
 

@@ -24,5 +24,15 @@ Note: `/` has no route defined and will return a 404 (`{"detail":"Not Found"}`) 
 ## Tests
 
 ```bash
-uv run pytest
+uv run pytest                                        # run all tests
+uv run pytest tests/test_health.py::test_health       # run a single test
+```
+
+## Migrations
+
+Alembic is configured against `app.db.models.Base.metadata`:
+
+```bash
+uv run alembic revision --autogenerate -m "message"
+uv run alembic upgrade head
 ```
