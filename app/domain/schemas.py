@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.domain.enums import (
     AnesthesiaType,
+    BlockType,
     CheckinStatus,
     MedAdherence,
     Presence,
@@ -186,6 +187,9 @@ class Summary(BaseModel):
     checkin_id: str
     patient_ref: str | None = Field(default=None, description="Opaque patient identifier.")
     anesthesia_type: AnesthesiaType
+    block_type: BlockType | None = Field(
+        default=None, description="The block that has to wear off. None when there isn't one."
+    )
     procedure: str | None = None
     status: CheckinStatus = CheckinStatus.IN_PROGRESS
 
@@ -210,3 +214,30 @@ class Summary(BaseModel):
     completed_at: datetime | None = None
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     turn_count: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def check_block_recorded_when_the_technique_implies_one(self) -> Self:
+        """Fail closed when a case that must have a block has none recorded.
+
+        `BLOCK_PROLONGED` can only fire against a `block_type`, so a missing one
+        is a silent safety gap rather than a visible error. Only the two
+        techniques that always imply a block are enforced; a general with an
+        adjunct block, or an epidural, stay permissive because absence there is
+        a legitimate answer.
+
+        This belongs on the `case` row once that table exists — Summary is
+        currently the only model carrying case facts.
+        """
+        if (
+            self.anesthesia_type is AnesthesiaType.SPINAL
+            and self.block_type is not BlockType.SPINAL
+        ):
+            raise ValueError(
+                "spinal anesthesia requires block_type=spinal so its regression window applies"
+            )
+        if (
+            self.anesthesia_type is AnesthesiaType.PERIPHERAL_NERVE_BLOCK
+            and self.block_type is None
+        ):
+            raise ValueError("peripheral_nerve_block anesthesia requires a block_type")
+        return self

@@ -2,6 +2,13 @@
 
 LLM-driven post-op patient check-in: scripted conversation state machine with deterministic safety/triage rules and a clinician review UI.
 
+## Design docs
+
+The condensed MVP specification lives in [`docs/`](docs/README.md) — scope, architecture, data
+model, the conversation protocol, the safety rule set, triage/summary, evals, and the build
+roadmap. `docs/README.md` is the index and also tracks where the spec and the current code
+disagree.
+
 ## Setup
 
 ```bash

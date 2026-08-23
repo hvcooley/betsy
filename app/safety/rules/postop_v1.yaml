@@ -1,4 +1,50 @@
 # Rule definitions — clinician-reviewable
 # TODO: define red-flag rules
 version: 1
+
+# Expected block regression windows. Drives BLOCK_PROLONGED: a sensory or motor
+# deficit still present past `flag_after_hours` is a YELLOW finding.
+#
+# Kept as data, not code, for two reasons: a clinician can revise a threshold
+# without a developer, and the deferred "schedule the call for when the block is
+# wearing off" feature reads this same table rather than needing a rewrite.
+#
+# Keys must be members of app.domain.enums.BlockType, and every member must
+# appear here — tests/test_domain.py enforces both, so a block type without a
+# window cannot ship silently.
+#
+# v1 DRAFT — pending clinical sign-off. See docs/roadmap.md.
+block_regression:
+  interscalene:
+    typical_hours: [12, 18]
+    flag_after_hours: 24
+  supraclavicular:
+    typical_hours: [12, 24]
+    flag_after_hours: 30
+  infraclavicular:
+    typical_hours: [12, 24]
+    flag_after_hours: 30
+  adductor_canal:
+    typical_hours: [12, 24]
+    flag_after_hours: 30
+  popliteal_sciatic:
+    typical_hours: [12, 24]
+    flag_after_hours: 36
+    notes: Longer with adjuvants.
+  tap:
+    typical_hours: [8, 16]
+    flag_after_hours: 24
+  field_block:
+    typical_hours: [8, 16]
+    flag_after_hours: 24
+  spinal:
+    typical_hours: [2, 6]
+    flag_after_hours: 8
+    notes: Assumes bupivacaine. Other agents need their own entry.
+
+# Hour extensions applied when an adjuvant was used (dexamethasone,
+# buprenorphine, clonidine). Empty until the SME supplies the numbers —
+# guessing here would flag real prolonged blocks as normal.
+block_adjuvants: {}
+
 rules: []

@@ -1,10 +1,13 @@
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from app.domain.enums import (
     AnesthesiaType,
+    BlockType,
     CheckinStatus,
     MedAdherence,
     Presence,
@@ -35,6 +38,19 @@ def make_extraction(**overrides: object) -> TurnExtraction:
     return TurnExtraction(**(defaults | overrides))
 
 
+def make_summary(**overrides: object) -> Summary:
+    defaults: dict[str, object] = {
+        "checkin_id": "chk_000",
+        "anesthesia_type": AnesthesiaType.GENERAL,
+        "headline": "No concerns reported.",
+        "protocol_version": "postop_v1",
+        "rules_version": "postop_v1",
+        "prompt_version": "v1",
+        "started_at": datetime(2026, 8, 19, 14, 0, tzinfo=UTC),
+    }
+    return Summary(**(defaults | overrides))
+
+
 # --- Enum value stability -------------------------------------------------
 # These strings live in rule YAML and in stored rows. Renaming one silently
 # breaks existing data, so pin the whole set.
@@ -45,7 +61,28 @@ def make_extraction(**overrides: object) -> TurnExtraction:
     [
         (
             AnesthesiaType,
-            {"general", "spinal", "epidural", "peripheral_nerve_block", "mac_sedation", "local"},
+            {
+                "general",
+                "spinal",
+                "epidural",
+                "combined_spinal_epidural",
+                "peripheral_nerve_block",
+                "mac_sedation",
+                "local",
+            },
+        ),
+        (
+            BlockType,
+            {
+                "interscalene",
+                "supraclavicular",
+                "infraclavicular",
+                "adductor_canal",
+                "popliteal_sciatic",
+                "tap",
+                "field_block",
+                "spinal",
+            },
         ),
         (Severity, {"none", "mild", "moderate", "severe"}),
         (Presence, {"present", "absent", "unknown"}),
@@ -108,6 +145,59 @@ def test_generalized_pain_has_no_symptom_code() -> None:
     neuraxial complication rather than grading overall pain.
     """
     assert "uncontrolled_pain" not in {code.value for code in SymptomCode}
+
+
+# --- Anesthesia type and block type stay orthogonal -----------------------
+# A patient can have a general anesthetic *and* a block. That combination is
+# expressed by two independent fields, never by a fused enum member.
+
+
+def test_anesthesia_type_does_not_enumerate_block_combinations() -> None:
+    values = {member.value for member in AnesthesiaType}
+    assert not [value for value in values if "with_block" in value or value == "regional_block"]
+
+
+def test_general_with_a_block_is_representable() -> None:
+    summary = make_summary(
+        anesthesia_type=AnesthesiaType.GENERAL, block_type=BlockType.INTERSCALENE
+    )
+    assert summary.anesthesia_type is AnesthesiaType.GENERAL
+    assert summary.block_type is BlockType.INTERSCALENE
+
+
+def test_general_without_a_block_records_no_block() -> None:
+    assert make_summary(anesthesia_type=AnesthesiaType.GENERAL).block_type is None
+
+
+def test_spinal_must_carry_its_block_type() -> None:
+    """Otherwise BLOCK_PROLONGED has no window to check and fails open."""
+    with pytest.raises(ValidationError, match="block_type=spinal"):
+        make_summary(anesthesia_type=AnesthesiaType.SPINAL)
+
+
+def test_block_as_the_primary_anesthetic_must_say_which_block() -> None:
+    with pytest.raises(ValidationError, match="requires a block_type"):
+        make_summary(anesthesia_type=AnesthesiaType.PERIPHERAL_NERVE_BLOCK)
+
+
+# --- Block regression windows ---------------------------------------------
+
+BLOCK_REGRESSION = yaml.safe_load(
+    (Path(__file__).resolve().parents[1] / "app" / "safety" / "rules" / "postop_v1.yaml").read_text()
+)["block_regression"]
+
+
+def test_every_block_type_has_a_regression_window() -> None:
+    """A block type without a window would let a prolonged block pass unflagged."""
+    assert set(BLOCK_REGRESSION) == {member.value for member in BlockType}
+
+
+@pytest.mark.parametrize("block", sorted(BLOCK_REGRESSION))
+def test_regression_window_is_coherent(block: str) -> None:
+    window = BLOCK_REGRESSION[block]
+    earliest, latest = window["typical_hours"]
+    assert 0 < earliest <= latest
+    assert window["flag_after_hours"] >= latest, "flagging inside the typical window guarantees FPs"
 
 
 # --- Pain 0-10 scale to Severity banding ----------------------------------
@@ -304,6 +394,7 @@ def test_summary_round_trips_through_json() -> None:
         checkin_id="chk_001",
         patient_ref="pt_abc",
         anesthesia_type=AnesthesiaType.SPINAL,
+        block_type=BlockType.SPINAL,
         procedure="knee arthroscopy",
         status=CheckinStatus.ESCALATED,
         tier=Tier.TIER_2,
@@ -326,15 +417,7 @@ def test_summary_round_trips_through_json() -> None:
 
 def test_summary_triage_defaults_to_the_least_urgent_disposition() -> None:
     """An empty summary must not imply escalation."""
-    summary = Summary(
-        checkin_id="chk_002",
-        anesthesia_type=AnesthesiaType.GENERAL,
-        headline="No concerns reported.",
-        protocol_version="postop_v1",
-        rules_version="postop_v1",
-        prompt_version="v1",
-        started_at=datetime(2026, 8, 19, 14, 0, tzinfo=UTC),
-    )
+    summary = make_summary(checkin_id="chk_002")
     assert summary.tier is Tier.TIER_3
     assert summary.route is Route.SELF_CARE
     assert summary.findings == []

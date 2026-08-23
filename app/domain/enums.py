@@ -17,14 +17,56 @@ from typing import Self
 
 
 class AnesthesiaType(str, Enum):
-    """How the patient was anesthetized. Selects protocol branches and rules."""
+    """The patient's *primary* anesthetic technique. Selects protocol branches.
+
+    Deliberately one technique, not a combination. A patient who had a general
+    anesthetic with an interscalene block is `GENERAL` with `block_type` set to
+    `BlockType.INTERSCALENE` — the block is recorded alongside, never fused into
+    this enum. Enumerating combinations here would multiply the member list with
+    every new block and still not express a third concurrent technique, and it
+    would give the block-regression window two places to live.
+
+    `PERIPHERAL_NERVE_BLOCK` means the block *was* the anesthetic (an awake case),
+    which is a different clinical picture from a block used as an adjunct; both
+    carry a `block_type`.
+    """
 
     GENERAL = "general"
     SPINAL = "spinal"
     EPIDURAL = "epidural"
+    COMBINED_SPINAL_EPIDURAL = "combined_spinal_epidural"
     PERIPHERAL_NERVE_BLOCK = "peripheral_nerve_block"
     MAC_SEDATION = "mac_sedation"
     LOCAL = "local"
+
+
+class BlockType(str, Enum):
+    """Which local-anesthetic block, if any, has to wear off.
+
+    Orthogonal to `AnesthesiaType`: this says what needs to regress, independent
+    of whether the block was the whole anesthetic or an adjunct to a general.
+    `None` means no tracked block — a general or MAC on its own, or surgeon-placed
+    local infiltration, neither of which has a regression window worth flagging.
+
+    Closed vocabulary because it keys the block-regression windows in
+    `app/safety/rules/postop_v1.yaml`, which drive `BLOCK_PROLONGED`. Adding a
+    member without adding its window would let a prolonged block pass unflagged,
+    so `tests/test_domain.py` requires the two to stay in step.
+
+    `SPINAL` sits here as well as in `AnesthesiaType` on purpose — a spinal is a
+    block that regresses on a clock like any other, and keeping it in the same
+    lookup means one code path asks "has sensation come back yet?" for every
+    patient who needs the question.
+    """
+
+    INTERSCALENE = "interscalene"
+    SUPRACLAVICULAR = "supraclavicular"
+    INFRACLAVICULAR = "infraclavicular"
+    ADDUCTOR_CANAL = "adductor_canal"
+    POPLITEAL_SCIATIC = "popliteal_sciatic"
+    TAP = "tap"
+    FIELD_BLOCK = "field_block"
+    SPINAL = "spinal"
 
 
 class Severity(str, Enum):

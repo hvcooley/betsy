@@ -1,6 +1,7 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for coding agents working in this repository. (`AGENTS.md` is a symlink to this file, so
+there is one copy to maintain.)
 
 ## What this is
 
@@ -10,7 +11,7 @@ on top of LLM extraction, and a clinician-facing review UI for surfacing finding
 
 The project is an early-stage skeleton — most modules currently contain only `TODO` docstrings and
 empty class/function bodies. When implementing a module, check its docstring for the intended
-purpose before designing from scratch.
+purpose, then check the governing doc in `docs/` before designing from scratch.
 
 ## Commands
 
@@ -22,29 +23,43 @@ uv run pytest                          # run all tests
 
 See README.md for full setup instructions and migration commands.
 
-## MVP scope
+## Design docs — read the relevant one before implementing
 
-| Capability | Notes |
+`docs/` holds the condensed MVP specification. Start at `docs/README.md` for the index and the
+list of known spec-vs-code divergences.
+
+| Working on | Read first |
 | --- | --- |
-| Text-based post-op follow-up conversation | Patient types, BETSY responds |
-| Deterministic conversation protocol | Anesthesia-specific script, versioned, data-driven |
-| Structured extraction per turn | Pain scores, symptoms, med adherence, red flags |
-| Deterministic red-flag rule engine | Escalation decisions are code, not LLM judgment |
-| Templated escalation messages | Zero-hallucination on the highest-liability output |
-| Stored transcript + structured findings | Full audit trail |
-| One-line summary header + triage tier | Feeds the future review dashboard |
-| Offline eval harness | Simulated patients, regression assertions, red-flag recall metrics |
-| Minimal review API + thin demo UI | Two static pages, no build step |
+| Anything | `docs/architecture.md` (the LLM/deterministic split, turn pipeline), `docs/scope.md` |
+| `app/protocol/` | `docs/protocol.md` — topics, slots, branching |
+| `app/safety/` | `docs/safety-rules.md` — RED/YELLOW/GREEN rules, block durations, conversational constraints |
+| `app/triage/`, `app/summary/` | `docs/triage-and-summary.md` |
+| `app/db/`, `app/main.py` | `docs/data-model.md` — tables and API surface |
+| `evals/` | `docs/evals.md` |
+| Sequencing, SME questions | `docs/roadmap.md` |
 
-Anything not on this list (e.g. voice/multi-channel intake, LLM-driven escalation judgment,
-a full review dashboard beyond the static demo pages) is out of scope unless the user says
-otherwise.
+Those docs deliberately contain **no file paths** — the directory map below is the only place
+layout is recorded, so restructuring the repo means editing this file and nothing else.
+
+## Non-negotiable invariants
+
+Violating any of these is a bug regardless of what the task asked for:
+
+1. **The LLM never owns control flow or the escalation decision.** The protocol engine decides
+   which topic is active; the rule engine decides escalation, evaluated against validated
+   structured fields, never free text.
+2. **A RED rule discards the LLM's drafted reply** and emits fixed clinician-authored copy.
+   Consequently, patient-facing replies are **never streamed**.
+3. **Tier is computed deterministically from findings**, never by the model.
+4. **Turn analysis is persisted on every turn, including failures.** It is the audit trail and the
+   eval substrate.
+5. **Synthetic data only.** No real PHI enters this system during the MVP.
+6. Full scope boundaries live in `docs/scope.md`; anything outside it needs the user to say so.
 
 ## Architecture
 
-The system is organized around a strict separation between **LLM-driven conversation** and
-**deterministic clinical logic**, so that safety-critical decisions (triage, red-flag detection)
-never depend solely on model output:
+Strict separation between **LLM-driven conversation** and **deterministic clinical logic**, so
+safety-critical decisions never depend solely on model output:
 
 - `app/protocol/` — the check-in *script*. `definitions/*.yaml` (e.g. `postop_v1.yaml`) is a
   clinician-editable protocol defining conversation topics/questions; `loader.py` parses it;
@@ -58,7 +73,8 @@ never depend solely on model output:
   `templates.py` holds fixed escalation copy (not LLM-generated, for predictability).
 - `app/triage/tiering.py` — deterministic Tier 1/2/3 assignment from safety rule outcomes.
 - `app/summary/generator.py` — builds the clinician-facing summary of a completed check-in.
-- `app/domain/` — shared types: `enums.py` (`AnesthesiaType`, `Severity`, `Route`, `Tier`) and
+- `app/domain/` — shared types: `enums.py` (`AnesthesiaType`, `BlockType`, `Severity`, `Route`,
+  `Tier`) and
   `schemas.py` (Pydantic models: `TurnExtraction`, `Finding`, `Summary`) used across the protocol,
   LLM, safety, and summary layers.
 - `app/db/` — SQLAlchemy models (`models.py`, currently just the `Base`) and session management
@@ -68,6 +84,7 @@ never depend solely on model output:
 - `evals/` — offline evaluation harness: `patient_sim.py` (LLM-simulated patient), `runner.py`
   (runs scenarios from `evals/scenarios/` against the protocol engine), `report.py` (reports
   results). Not yet implemented.
+- `docs/` — condensed MVP specification (see the table above).
 
 ### Versioning convention
 
