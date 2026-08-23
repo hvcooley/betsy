@@ -30,8 +30,9 @@ finding          id, conversation_id, source_message_id, code, value_json,
                  severity (green|yellow|red), confidence, created_at
 
 escalation       id, conversation_id, rule_id, rule_version, severity,
-                 route (911|ED_NOW|CALL_SURGEON|CALL_ANESTHESIA|ROUTINE),
+                 route (call_911|ed_now|call_surgeon|call_anesthesia|routine),
                  triggered_at, template_id, message_shown
+                 -- one row per route: a rule owing two owners writes two.
 
 summary          id, conversation_id, tier (1|2|3), one_liner,
                  structured_json, narrative, model, prompt_version,
@@ -49,8 +50,9 @@ review           id, conversation_id, reviewer_name, action (approve|needs_call|
 - `escalation.route` matters more than it looks. Not every red flag goes to anesthesia — a
   bleeding wound goes to the surgeon, chest pain goes to 911. Getting routing into the model on
   day one prevents a painful refactor when the dashboard needs to sort by who owns the problem.
-  (See "`Route` loses the who-owns-this distinction" in [README.md](README.md) — the current
-  `Route` enum does not carry this.)
+  The `Route` enum carries that owner, and a rule that owes two owners records both routes rather
+  than collapsing to the more urgent one — see "`Route` loses the who-owns-this distinction" under
+  resolved divergences in [README.md](README.md).
 
 ### `case` carries the block-regression inputs
 

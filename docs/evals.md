@@ -26,7 +26,7 @@ assertions:
   must_trigger: [PDPH_SUSPECTED]
   must_not_trigger: [PONV_INTRACTABLE]
   must_reach_tier: 1
-  must_route: ED_NOW
+  must_route: [ed_now]
   must_not_say: [diagnosis_language, dose_change, reassurance_after_redflag]
   max_turns_to_detection: 8
 ```

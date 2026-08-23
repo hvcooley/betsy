@@ -12,6 +12,7 @@ from app.domain.enums import (
     MedAdherence,
     Presence,
     Route,
+    RouteOwner,
     Severity,
     SymptomCode,
     Tier,
@@ -88,7 +89,8 @@ def make_summary(**overrides: object) -> Summary:
         (Presence, {"present", "absent", "unknown"}),
         (Trend, {"better", "unchanged", "worse", "unknown"}),
         (MedAdherence, {"as_prescribed", "partial", "not_taking", "unknown"}),
-        (Route, {"self_care", "call_clinic", "urgent_same_day", "emergency_911"}),
+        (Route, {"call_911", "ed_now", "call_surgeon", "call_anesthesia", "routine"}),
+        (RouteOwner, {"ems", "emergency_dept", "surgeon", "anesthesia", "patient"}),
         (Tier, {"tier_1", "tier_2", "tier_3"}),
         (CheckinStatus, {"in_progress", "completed", "abandoned", "escalated"}),
         (
@@ -240,12 +242,7 @@ def test_pain_report_severity_is_not_stored() -> None:
 
 
 def test_route_rank_ascends_with_urgency() -> None:
-    assert (
-        Route.SELF_CARE.rank
-        < Route.CALL_CLINIC.rank
-        < Route.URGENT_SAME_DAY.rank
-        < Route.EMERGENCY_911.rank
-    )
+    assert Route.ROUTINE.rank < Route.CALL_SURGEON.rank < Route.ED_NOW.rank < Route.CALL_911.rank
 
 
 def test_tier_rank_inverts_the_number() -> None:
@@ -255,12 +252,63 @@ def test_tier_rank_inverts_the_number() -> None:
 
 def test_most_urgent_picks_the_worst() -> None:
     assert Tier.most_urgent([Tier.TIER_3, Tier.TIER_1, Tier.TIER_2]) is Tier.TIER_1
-    assert Route.most_urgent([Route.CALL_CLINIC, Route.EMERGENCY_911]) is Route.EMERGENCY_911
+    assert Route.most_urgent([Route.CALL_SURGEON, Route.CALL_911]) is Route.CALL_911
 
 
 def test_most_urgent_defaults_when_nothing_fired() -> None:
     assert Tier.most_urgent([]) is Tier.TIER_3
-    assert Route.most_urgent([]) is Route.SELF_CARE
+    assert Route.most_urgent([]) is Route.ROUTINE
+
+
+# --- Routes carry who owns the problem ------------------------------------
+# A route is an urgency *and* an owner. Bleeding is the surgeon's; a block that
+# will not wear off is anesthesia's. Anything that reduces a set of routes by
+# urgency alone drops one of those owners on the floor.
+
+
+def test_every_route_has_an_owner() -> None:
+    assert {route.owner for route in Route} == set(RouteOwner)
+
+
+def test_calling_the_surgeon_is_not_calling_anesthesia() -> None:
+    """The distinction the old `call_clinic` member erased."""
+    assert Route.CALL_SURGEON.owner is not Route.CALL_ANESTHESIA.owner
+
+
+def test_equally_urgent_routes_tie_on_rank() -> None:
+    """Neither owner outranks the other, so rank must not pretend otherwise."""
+    assert Route.CALL_SURGEON.rank == Route.CALL_ANESTHESIA.rank
+
+
+def test_combine_keeps_both_owners() -> None:
+    combined = Route.combine([Route.CALL_ANESTHESIA, Route.CALL_SURGEON])
+    assert set(combined) == {Route.CALL_SURGEON, Route.CALL_ANESTHESIA}
+
+
+def test_combine_keeps_the_surgeon_alongside_a_more_urgent_route() -> None:
+    """SURGICAL_BLEEDING is `CALL_SURGEON + ED_NOW`, not whichever is worse."""
+    assert Route.combine([Route.CALL_SURGEON, Route.ED_NOW]) == (
+        Route.ED_NOW,
+        Route.CALL_SURGEON,
+    )
+
+
+def test_combine_orders_worst_first() -> None:
+    combined = Route.combine([Route.CALL_ANESTHESIA, Route.CALL_911, Route.ED_NOW])
+    assert combined == (Route.CALL_911, Route.ED_NOW, Route.CALL_ANESTHESIA)
+
+
+def test_combine_keeps_one_route_per_owner() -> None:
+    assert Route.combine([Route.CALL_SURGEON, Route.CALL_SURGEON]) == (Route.CALL_SURGEON,)
+
+
+def test_combine_drops_routine_once_anything_fired() -> None:
+    assert Route.combine([Route.ROUTINE, Route.CALL_ANESTHESIA]) == (Route.CALL_ANESTHESIA,)
+
+
+def test_combine_defaults_to_routine() -> None:
+    assert Route.combine([]) == (Route.ROUTINE,)
+    assert Route.combine([Route.ROUTINE]) == (Route.ROUTINE,)
 
 
 # --- SymptomObservation coherence ----------------------------------------
@@ -376,17 +424,41 @@ def make_finding() -> Finding:
         label="Fever with wound drainage — possible surgical site infection",
         severity=Severity.MODERATE,
         tier=Tier.TIER_2,
-        route=Route.URGENT_SAME_DAY,
+        routes=[Route.CALL_SURGEON],
         evidence=["fever present (mild)", "temperature_f=100.9"],
         quotes=["I feel warm and the dressing is damp"],
         turn_index=3,
-        escalation_template_key="urgent_same_day_infection",
+        escalation_template_key="call_surgeon_infection",
     )
 
 
 def test_finding_round_trips_through_json() -> None:
     finding = make_finding()
     assert Finding.model_validate_json(finding.model_dump_json()) == finding
+
+
+def test_finding_must_route_somewhere() -> None:
+    """A rule that fired and told no one is a rule that did nothing."""
+    with pytest.raises(ValidationError):
+        Finding(
+            rule_id="surgical_bleeding",
+            rules_version="postop_v1",
+            label="Soaking through the dressing",
+            severity=Severity.SEVERE,
+            tier=Tier.TIER_1,
+            routes=[],
+        )
+
+
+def test_finding_routes_are_stored_canonically() -> None:
+    """Same instruction, same rows — order and duplicates must not persist."""
+    base = make_finding().model_dump()
+    reordered = Finding.model_validate(base | {"routes": [Route.CALL_SURGEON, Route.ED_NOW]})
+    duplicated = Finding.model_validate(
+        base | {"routes": [Route.ED_NOW, Route.CALL_SURGEON, Route.ED_NOW]}
+    )
+    assert reordered.routes == [Route.ED_NOW, Route.CALL_SURGEON]
+    assert duplicated.routes == reordered.routes
 
 
 def test_summary_round_trips_through_json() -> None:
@@ -398,7 +470,7 @@ def test_summary_round_trips_through_json() -> None:
         procedure="knee arthroscopy",
         status=CheckinStatus.ESCALATED,
         tier=Tier.TIER_2,
-        route=Route.URGENT_SAME_DAY,
+        routes=[Route.CALL_SURGEON],
         findings=[make_finding()],
         max_pain_score=7,
         pain_trend=Trend.WORSE,
@@ -419,5 +491,11 @@ def test_summary_triage_defaults_to_the_least_urgent_disposition() -> None:
     """An empty summary must not imply escalation."""
     summary = make_summary(checkin_id="chk_002")
     assert summary.tier is Tier.TIER_3
-    assert summary.route is Route.SELF_CARE
+    assert summary.routes == [Route.ROUTINE]
     assert summary.findings == []
+
+
+def test_summary_keeps_the_surgeon_and_anesthesia_separate() -> None:
+    """A bleeding wound and a stuck block owe two different people."""
+    summary = make_summary(routes=[Route.CALL_ANESTHESIA, Route.CALL_SURGEON])
+    assert set(summary.routes) == {Route.CALL_SURGEON, Route.CALL_ANESTHESIA}

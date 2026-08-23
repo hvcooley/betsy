@@ -74,7 +74,7 @@ safety-critical decisions never depend solely on model output:
 - `app/triage/tiering.py` — deterministic Tier 1/2/3 assignment from safety rule outcomes.
 - `app/summary/generator.py` — builds the clinician-facing summary of a completed check-in.
 - `app/domain/` — shared types: `enums.py` (`AnesthesiaType`, `BlockType`, `Severity`, `Route`,
-  `Tier`) and
+  `RouteOwner`, `Tier`) and
   `schemas.py` (Pydantic models: `TurnExtraction`, `Finding`, `Summary`) used across the protocol,
   LLM, safety, and summary layers.
 - `app/db/` — SQLAlchemy models (`models.py`, currently just the `Base`) and session management

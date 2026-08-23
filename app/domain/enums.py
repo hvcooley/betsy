@@ -139,27 +139,97 @@ class MedAdherence(str, Enum):
     UNKNOWN = "unknown"
 
 
-class Route(str, Enum):
-    """What the patient is told to do. Keys the fixed copy in safety/templates.py.
+class RouteOwner(str, Enum):
+    """Who has to act on a route.
 
-    Distinct from `Tier`: Tier says how urgent a finding is, Route says what
-    action it triggers. Ordered via `rank`.
+    The second dimension of a disposition, and the one a single urgency ordinal
+    cannot carry: soaking through a dressing and a block that will not wear off
+    are both "call someone today", but they are not the same someone. The review
+    dashboard sorts by this, so it has to be recoverable from a stored route.
+
+    Derived from `Route` rather than stored beside it — see `Route.owner`. One
+    route means exactly one owner; two routes are how a finding reaches two.
     """
 
-    SELF_CARE = "self_care"
-    CALL_CLINIC = "call_clinic"
-    URGENT_SAME_DAY = "urgent_same_day"
-    EMERGENCY_911 = "emergency_911"
+    EMS = "ems"
+    EMERGENCY_DEPT = "emergency_dept"
+    SURGEON = "surgeon"
+    ANESTHESIA = "anesthesia"
+    PATIENT = "patient"
+
+
+class Route(str, Enum):
+    """One action a finding demands. Keys the fixed copy in safety/templates.py.
+
+    Distinct from `Tier`: Tier says how urgent a finding is, Route says what
+    action it triggers *and who owns it* (`owner`). Ordered by urgency via
+    `rank`, which deliberately does **not** totally order the members —
+    `CALL_SURGEON` and `CALL_ANESTHESIA` are equally urgent and differ only in
+    owner. Collapsing them into one "call the clinic" member is the loss this
+    vocabulary exists to prevent: bleeding is the surgeon's problem, a prolonged
+    block is anesthesia's, and a dashboard that cannot tell them apart routes
+    every escalation to the wrong pager.
+
+    Because of that tie, a set of routes does not reduce to its maximum. Combine
+    dispositions with `combine`, which keeps one route per owner; use
+    `most_urgent` only to pick which single template the patient is shown.
+    """
+
+    CALL_911 = "call_911"
+    ED_NOW = "ed_now"
+    CALL_SURGEON = "call_surgeon"
+    CALL_ANESTHESIA = "call_anesthesia"
+    ROUTINE = "routine"
+
+    @property
+    def owner(self) -> RouteOwner:
+        """Who has to act. Distinct owners survive `combine` independently."""
+        return _ROUTE_OWNER[self]
 
     @property
     def rank(self) -> int:
-        """Ordinal for comparisons; higher demands faster action."""
+        """Urgency ordinal; higher demands faster action. Ties are meaningful.
+
+        `CALL_SURGEON` and `CALL_ANESTHESIA` share a rank because neither is
+        more urgent than the other. Never use this to pick between them.
+        """
         return _ROUTE_ORDER[self]
 
     @classmethod
+    def combine(cls, values: Iterable[Self]) -> tuple[Self, ...]:
+        """Every distinct action `values` demands, worst first.
+
+        The reduction is per owner, not global: the most urgent route for each
+        owner survives, so `{CALL_SURGEON, ED_NOW}` (soaking dressing — go in,
+        and the surgeon needs to know) stays two routes, while
+        `{CALL_ANESTHESIA, CALL_ANESTHESIA}` is one. `ROUTINE` drops out as soon
+        as anything else fired, since "no action needed" alongside an action is
+        noise; an empty input is `(ROUTINE,)`, so the default disposition is
+        always the least urgent one.
+
+        Ties within a rank are ordered by declaration order. That is a
+        presentation choice for the dashboard, never a clinical claim that one
+        owner outranks the other.
+        """
+        by_owner: dict[RouteOwner, Self] = {}
+        for route in values:
+            incumbent = by_owner.get(route.owner)
+            if incumbent is None or route.rank > incumbent.rank:
+                by_owner[route.owner] = route
+        actionable = [route for route in by_owner.values() if route is not cls.ROUTINE]
+        if not actionable:
+            return (cls.ROUTINE,)
+        return tuple(sorted(actionable, key=lambda route: (-route.rank, _ROUTE_TIEBREAK[route])))
+
+    @classmethod
     def most_urgent(cls, values: Iterable[Self]) -> Self:
-        """The most demanding route in `values`, or SELF_CARE if empty."""
-        return max(values, key=lambda route: route.rank, default=cls.SELF_CARE)
+        """The single route whose copy the patient is shown, or ROUTINE if empty.
+
+        For patient-facing text only, where one message has to be chosen. Any
+        caller deciding *who gets told* must use `combine` instead — this drops
+        every route but one, and the one it keeps on a tie is arbitrary.
+        """
+        return cls.combine(values)[0]
 
 
 class Tier(str, Enum):
@@ -258,12 +328,27 @@ _SEVERITY_ORDER: dict[Severity, int] = {
     Severity.SEVERE: 3,
 }
 
-_ROUTE_ORDER: dict[Route, int] = {
-    Route.SELF_CARE: 0,
-    Route.CALL_CLINIC: 1,
-    Route.URGENT_SAME_DAY: 2,
-    Route.EMERGENCY_911: 3,
+_ROUTE_OWNER: dict[Route, RouteOwner] = {
+    Route.CALL_911: RouteOwner.EMS,
+    Route.ED_NOW: RouteOwner.EMERGENCY_DEPT,
+    Route.CALL_SURGEON: RouteOwner.SURGEON,
+    Route.CALL_ANESTHESIA: RouteOwner.ANESTHESIA,
+    Route.ROUTINE: RouteOwner.PATIENT,
 }
+
+# Urgency only. CALL_SURGEON and CALL_ANESTHESIA tie on purpose: they are the
+# same clinical urgency and differ only in `owner`, so anything comparing them
+# by rank is asking the wrong question.
+_ROUTE_ORDER: dict[Route, int] = {
+    Route.ROUTINE: 0,
+    Route.CALL_SURGEON: 1,
+    Route.CALL_ANESTHESIA: 1,
+    Route.ED_NOW: 2,
+    Route.CALL_911: 3,
+}
+
+# Display tiebreak for equally urgent routes. Presentation, not clinical order.
+_ROUTE_TIEBREAK: dict[Route, int] = {route: index for index, route in enumerate(Route)}
 
 _TIER_ORDER: dict[Tier, int] = {
     Tier.TIER_3: 0,

@@ -14,19 +14,24 @@ conversation is marked escalated and the protocol stops.
 
 | Rule ID | Trigger | Route |
 | --- | --- | --- |
-| `RESP_DISTRESS` | Shortness of breath, stridor, difficulty swallowing/drooling | 911 |
-| `CHEST_PAIN` | Chest pain or pressure; palpitations with syncope | 911 |
-| `LAST_SYMPTOMS` | Perioral numbness, metallic taste, tinnitus, dizziness in a patient with a block or catheter | 911 |
+| `RESP_DISTRESS` | Shortness of breath, stridor, difficulty swallowing/drooling | CALL_911 |
+| `CHEST_PAIN` | Chest pain or pressure; palpitations with syncope | CALL_911 |
+| `LAST_SYMPTOMS` | Perioral numbness, metallic taste, tinnitus, dizziness in a patient with a block or catheter | CALL_911 |
 | `NEURAXIAL_HEMATOMA` | New/progressive leg weakness, saddle numbness, bowel or bladder incontinence, or severe new back pain after neuraxial | ED_NOW — time-critical surgical window |
 | `COMPARTMENT_SYNDROME` | Pain out of proportion, worse on passive stretch, tightness in a casted/splinted limb | ED_NOW |
 | `PDPH_SUSPECTED` | Postural headache (worse upright / better supine) after neuraxial, ± visual changes, tinnitus, neck stiffness | ED_NOW or CALL_ANESTHESIA per severity |
 | `PONV_INTRACTABLE` | Vomiting with inability to tolerate any PO fluids, or no urine output >12h | ED_NOW |
-| `OVERSEDATION` | Caregiver reports difficulty rousing the patient, especially with opioid + OSA history | 911 |
-| `ANAPHYLAXIS_LATE` | Spreading hives, facial/tongue swelling, breathing change | 911 |
-| `MH_SUSPECTED` | Fever with muscle rigidity / dark urine within 24h of triggering agents | 911 |
+| `OVERSEDATION` | Caregiver reports difficulty rousing the patient, especially with opioid + OSA history | CALL_911 |
+| `ANAPHYLAXIS_LATE` | Spreading hives, facial/tongue swelling, breathing change | CALL_911 |
+| `MH_SUSPECTED` | Fever with muscle rigidity / dark urine within 24h of triggering agents | CALL_911 |
 | `DVT_SUSPECTED` | Unilateral calf pain with swelling/warmth | ED_NOW |
 | `SURGICAL_BLEEDING` | Soaking through a dressing, expanding hematoma | CALL_SURGEON + ED_NOW |
 | `SUICIDAL_IDEATION` | Any expression of self-harm | Human handoff, crisis resources |
+
+The Route column holds `Route` members, and a rule may carry more than one — `SURGICAL_BLEEDING`
+is `CALL_SURGEON` *and* `ED_NOW`, because who owns the problem is a separate question from how fast
+it has to be seen. A rule must never be reduced to whichever of its routes is most urgent; that
+drops an owner. See the resolved `Route` divergence in [README.md](README.md).
 
 ## YELLOW — record a finding, continue the conversation, Tier 2
 

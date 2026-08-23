@@ -4,7 +4,7 @@ The governing rule of this project: **the LLM produces observations, determinist
 code produces decisions.** `TurnExtraction` is therefore designed to be rich enough
 that `app/safety/rules.py` can evaluate every rule against its fields alone, without
 ever re-reading the patient's free text. Correspondingly, no field on `Summary` that
-drives a clinical decision (`tier`, `route`, `findings`) originates from the model.
+drives a clinical decision (`tier`, `routes`, `findings`) originates from the model.
 
 These models are stored as JSON by the DB layer, so field names are part of the
 persisted format and change with a version bump, not in place.
@@ -13,7 +13,7 @@ persisted format and change with a version bump, not in place.
 from datetime import UTC, datetime
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.domain.enums import (
     AnesthesiaType,
@@ -27,6 +27,17 @@ from app.domain.enums import (
     Tier,
     Trend,
 )
+
+
+def _normalized_routes(routes: list[Route]) -> list[Route]:
+    """Dedupe by owner and order worst first, so stored routes are canonical.
+
+    Two rows recording the same dispositions in a different order have to
+    compare equal — they are the same clinical instruction — and a route list
+    holding both ROUTINE and ED_NOW is a contradiction, not a longer answer.
+    `Route.combine` is the single place those decisions live.
+    """
+    return list(Route.combine(routes))
 
 
 class PainReport(BaseModel):
@@ -163,7 +174,14 @@ class Finding(BaseModel):
     label: str = Field(description="Clinician-facing one-liner, from the rule definition.")
     severity: Severity
     tier: Tier
-    route: Route
+    routes: list[Route] = Field(
+        min_length=1,
+        description=(
+            "Every action this rule demands, worst first, one per owner. A list because "
+            "one rule can owe two people: a soaking dressing is ED_NOW *and* CALL_SURGEON. "
+            "`routes[0]` selects the patient-facing copy."
+        ),
+    )
     evidence: list[str] = Field(
         default_factory=list, description="Which extracted values matched, in readable form."
     )
@@ -173,6 +191,11 @@ class Finding(BaseModel):
         default=None, description="Key into safety/templates.py; None means no patient-facing copy."
     )
     detected_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @field_validator("routes")
+    @classmethod
+    def canonicalize_routes(cls, routes: list[Route]) -> list[Route]:
+        return _normalized_routes(routes)
 
 
 class Summary(BaseModel):
@@ -195,7 +218,15 @@ class Summary(BaseModel):
 
     # --- Deterministic: derived from rules, reproducible, decision-bearing --
     tier: Tier = Tier.TIER_3
-    route: Route = Route.SELF_CARE
+    routes: list[Route] = Field(
+        default_factory=lambda: [Route.ROUTINE],
+        min_length=1,
+        description=(
+            "Combined dispositions across all findings, worst first, one per owner. "
+            "A check-in with both a bleeding wound and a prolonged block owes the "
+            "surgeon and anesthesia separately, so this cannot reduce to one value."
+        ),
+    )
     findings: list[Finding] = Field(default_factory=list)
     max_pain_score: int | None = Field(default=None, ge=0, le=10)
     pain_trend: Trend = Trend.UNKNOWN
@@ -214,6 +245,11 @@ class Summary(BaseModel):
     completed_at: datetime | None = None
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     turn_count: int = Field(default=0, ge=0)
+
+    @field_validator("routes")
+    @classmethod
+    def canonicalize_routes(cls, routes: list[Route]) -> list[Route]:
+        return _normalized_routes(routes)
 
     @model_validator(mode="after")
     def check_block_recorded_when_the_technique_implies_one(self) -> Self:

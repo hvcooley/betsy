@@ -40,11 +40,6 @@ below.
 Points where the shipped skeleton and the spec do not yet agree. Each needs a decision, not just
 a rename. Referred to by name elsewhere in these docs, so the names are stable.
 
-**`Route` loses the who-owns-this distinction.** Code has `self_care | call_clinic |
-urgent_same_day | emergency_911`; the spec routes to `911 | ED_NOW | CALL_SURGEON |
-CALL_ANESTHESIA | ROUTINE`. Bleeding goes to the surgeon, a prolonged block goes to anesthesia —
-collapsing both into `call_clinic` is the refactor the spec explicitly warns against.
-
 **`checkin` vs `case`/`conversation` naming.** `Summary.checkin_id` implies one entity; the data
 model splits a durable `case` from a per-call `conversation`. Pick one before the SQLAlchemy
 models are written.
@@ -57,6 +52,28 @@ extraction and schema hard-failures. The spec's definition is the one the ROI ar
 is the only thing read for a Tier 3 case.
 
 ## Resolved divergences
+
+**`Route` loses the who-owns-this distinction** — *resolved: the spec's five routes, plus an owner
+and a set-valued disposition.* `Route` is now `call_911 | ed_now | call_surgeon | call_anesthesia |
+routine`, so bleeding reaches the surgeon and a prolonged block reaches anesthesia instead of both
+landing in one `call_clinic` bucket. Stored values stay lowercase snake_case like every other enum;
+`call_911` rather than the spec's bare `911` because an unquoted `911` in a rules YAML parses as an
+integer.
+
+Two consequences fell out of the change, and both are load-bearing:
+
+- **A route is an urgency *and* an owner.** `CALL_SURGEON` and `CALL_ANESTHESIA` are equally urgent,
+  so `rank` deliberately ties them and `Route.owner` (a `RouteOwner`) carries the difference — that
+  is what the review dashboard sorts by, per [data-model.md](data-model.md). Nothing may pick
+  between the two by rank.
+- **Dispositions therefore do not reduce to a maximum.** `SURGICAL_BLEEDING` is `CALL_SURGEON +
+  ED_NOW`, and a check-in with both a bleeding wound and a stuck block owes two different people, so
+  `Finding.routes` and `Summary.routes` are lists, not single values. `Route.combine` merges them:
+  the most urgent route per owner, worst first, with `routine` dropping out as soon as anything else
+  fires and standing alone when nothing does. `Route.most_urgent` still returns one route, but only
+  for choosing which single template the patient is shown — never for deciding who gets told.
+
+An escalation row stores one route, so a rule with two routes writes one row per route.
 
 **Anesthesia type vs. block type** — *resolved: two orthogonal fields.* The spec branched on fused
 values (`general_with_block`, `regional_block`, `cse`, `local_only`) that a single flat enum could
