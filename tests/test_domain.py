@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from app.domain.enums import (
     AnesthesiaType,
     BlockType,
-    CheckinStatus,
+    ConversationStatus,
     MedAdherence,
     Presence,
     Route,
@@ -41,7 +41,7 @@ def make_extraction(**overrides: object) -> TurnExtraction:
 
 def make_summary(**overrides: object) -> Summary:
     defaults: dict[str, object] = {
-        "checkin_id": "chk_000",
+        "conversation_id": "conv_000",
         "anesthesia_type": AnesthesiaType.GENERAL,
         "headline": "No concerns reported.",
         "protocol_version": "postop_v1",
@@ -92,7 +92,7 @@ def make_summary(**overrides: object) -> Summary:
         (Route, {"call_911", "ed_now", "call_surgeon", "call_anesthesia", "routine"}),
         (RouteOwner, {"ems", "emergency_dept", "surgeon", "anesthesia", "patient"}),
         (Tier, {"tier_1", "tier_2", "tier_3"}),
-        (CheckinStatus, {"in_progress", "completed", "abandoned", "escalated"}),
+        (ConversationStatus, {"in_progress", "completed", "abandoned", "escalated"}),
         (
             SymptomCode,
             {
@@ -463,12 +463,12 @@ def test_finding_routes_are_stored_canonically() -> None:
 
 def test_summary_round_trips_through_json() -> None:
     summary = Summary(
-        checkin_id="chk_001",
+        conversation_id="conv_001",
         patient_ref="pt_abc",
         anesthesia_type=AnesthesiaType.SPINAL,
         block_type=BlockType.SPINAL,
         procedure="knee arthroscopy",
-        status=CheckinStatus.ESCALATED,
+        status=ConversationStatus.ESCALATED,
         tier=Tier.TIER_2,
         routes=[Route.CALL_SURGEON],
         findings=[make_finding()],
@@ -489,7 +489,7 @@ def test_summary_round_trips_through_json() -> None:
 
 def test_summary_triage_defaults_to_the_least_urgent_disposition() -> None:
     """An empty summary must not imply escalation."""
-    summary = make_summary(checkin_id="chk_002")
+    summary = make_summary(conversation_id="conv_002")
     assert summary.tier is Tier.TIER_3
     assert summary.routes == [Route.ROUTINE]
     assert summary.findings == []

@@ -40,10 +40,6 @@ below.
 Points where the shipped skeleton and the spec do not yet agree. Each needs a decision, not just
 a rename. Referred to by name elsewhere in these docs, so the names are stable.
 
-**`checkin` vs `case`/`conversation` naming.** `Summary.checkin_id` implies one entity; the data
-model splits a durable `case` from a per-call `conversation`. Pick one before the SQLAlchemy
-models are written.
-
 **Tier semantics.** Code docstrings read Tier 1 as "emergent"; the spec defines it as "complex —
 mandatory follow-up call", which also catches abandonment, proxy-reported yellows, low-confidence
 extraction and schema hard-failures. The spec's definition is the one the ROI argument depends on.
@@ -52,6 +48,19 @@ extraction and schema hard-failures. The spec's definition is the one the ROI ar
 is the only thing read for a Tier 3 case.
 
 ## Resolved divergences
+
+**`checkin` vs `case`/`conversation` naming** — *resolved: adopt the spec's split.* A patient can
+have more than one post-op call for the same episode (e.g. separate POD1 and POD3 check-ins), so a
+single `checkin` entity would conflate the durable per-patient episode with each individual call.
+The domain layer now names things the way [data-model.md](data-model.md) does: `Summary` — the
+record of one completed call — carries `conversation_id`, not `checkin_id`, and `CheckinStatus`
+is renamed `ConversationStatus`. There is no `Case` or `Conversation` Pydantic model yet since
+`app/db/models.py` is still a stub; when those SQLAlchemy models are written, `case` owns the
+patient/procedure/anesthesia facts and has many `conversation` rows, each with its own status and
+its own `Summary`. The case-level fields still living on `Summary`
+(`anesthesia_type`, `block_type`, `procedure`) are the pre-existing carry-over noted in
+[data-model.md](data-model.md#case-carries-the-block-regression-inputs) — they move to `case` once
+that table exists, not part of this rename.
 
 **`Route` loses the who-owns-this distinction** — *resolved: the spec's five routes, plus an owner
 and a set-valued disposition.* `Route` is now `call_911 | ed_now | call_surgeon | call_anesthesia |

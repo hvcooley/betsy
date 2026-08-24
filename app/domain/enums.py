@@ -259,8 +259,14 @@ class Tier(str, Enum):
         return max(values, key=lambda tier: tier.rank, default=cls.TIER_3)
 
 
-class CheckinStatus(str, Enum):
-    """Lifecycle of a single check-in conversation."""
+class ConversationStatus(str, Enum):
+    """Lifecycle of a single conversation — one check-in call within a case.
+
+    A `case` is the durable per-patient episode; a `case` can have many
+    `conversation`s (e.g. a POD1 call and a separate POD3 call), each with its
+    own lifecycle tracked here. See the `checkin` vs `case`/`conversation`
+    naming divergence in docs/README.md.
+    """
 
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"

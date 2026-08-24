@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.domain.enums import (
     AnesthesiaType,
     BlockType,
-    CheckinStatus,
+    ConversationStatus,
     MedAdherence,
     Presence,
     Route,
@@ -199,22 +199,25 @@ class Finding(BaseModel):
 
 
 class Summary(BaseModel):
-    """The clinician-facing record of a completed check-in.
+    """The clinician-facing record of one completed conversation (a single call).
 
-    The deterministic and LLM-generated blocks are kept visibly separate: the
-    triage decision must remain reproducible from the findings alone, with the
-    narrative treated as unreviewed prose.
+    A `case` is the durable per-patient episode; a `case` can have many
+    `conversation`s (e.g. separate POD1 and POD3 calls), so a `Summary` is
+    scoped to one `conversation`, not the case as a whole. The deterministic
+    and LLM-generated blocks are kept visibly separate: the triage decision
+    must remain reproducible from the findings alone, with the narrative
+    treated as unreviewed prose.
     """
 
     # --- Identity ---------------------------------------------------------
-    checkin_id: str
+    conversation_id: str
     patient_ref: str | None = Field(default=None, description="Opaque patient identifier.")
     anesthesia_type: AnesthesiaType
     block_type: BlockType | None = Field(
         default=None, description="The block that has to wear off. None when there isn't one."
     )
     procedure: str | None = None
-    status: CheckinStatus = CheckinStatus.IN_PROGRESS
+    status: ConversationStatus = ConversationStatus.IN_PROGRESS
 
     # --- Deterministic: derived from rules, reproducible, decision-bearing --
     tier: Tier = Tier.TIER_3
