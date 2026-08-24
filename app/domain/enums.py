@@ -240,7 +240,13 @@ class Tier(str, Enum):
     """
 
     TIER_1 = "tier_1"
-    """Emergent — escalate now."""
+    """Complex — mandatory follow-up call, no dashboard approval path.
+
+    Not just "sickest patient": also covers cases where the record itself is
+    unreliable — an abandoned conversation with an unresolved symptom, a
+    proxy-reported conversation with any yellow finding, two or more topics
+    with low-confidence extraction, or a schema validation hard-failure.
+    """
 
     TIER_2 = "tier_2"
     """Urgent — clinician review today."""

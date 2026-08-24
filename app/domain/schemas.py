@@ -236,7 +236,10 @@ class Summary(BaseModel):
     adherence: MedAdherence = MedAdherence.UNKNOWN
 
     # --- LLM-generated: prose only, never drives triage ---------------------
-    headline: str = Field(description="One-line header for the review queue.")
+    headline: str = Field(
+        max_length=140,
+        description="One-line header for the review queue. The only thing read for a Tier 3 case.",
+    )
     narrative: str | None = None
     headline_source: Literal["llm", "template"] = "llm"
 

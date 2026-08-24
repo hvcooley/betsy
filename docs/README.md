@@ -40,14 +40,13 @@ below.
 Points where the shipped skeleton and the spec do not yet agree. Each needs a decision, not just
 a rename. Referred to by name elsewhere in these docs, so the names are stable.
 
-**Tier semantics.** Code docstrings read Tier 1 as "emergent"; the spec defines it as "complex —
-mandatory follow-up call", which also catches abandonment, proxy-reported yellows, low-confidence
-extraction and schema hard-failures. The spec's definition is the one the ROI argument depends on.
-
-**No length cap on `Summary.headline`.** The spec caps the one-liner at 140 characters, since it
-is the only thing read for a Tier 3 case.
+_None currently._
 
 ## Resolved divergences
+
+**No length cap on `Summary.headline`** — *resolved: added the spec's 140-character cap.*
+`headline` now sets `max_length=140` in [`app/domain/schemas.py`](../app/domain/schemas.py), since
+it is the only thing read for a Tier 3 case.
 
 **`checkin` vs `case`/`conversation` naming** — *resolved: adopt the spec's split.* A patient can
 have more than one post-op call for the same episode (e.g. separate POD1 and POD3 check-ins), so a
