@@ -44,6 +44,34 @@ _None currently._
 
 ## Resolved divergences
 
+**`SymptomCode` could not express half the RED rules** — *resolved: extended v1 in place.* Writing
+the rule file surfaced that the vocabulary had no way to say perioral numbness, metallic taste or
+tinnitus (`LAST_SYMPTOMS`), calf swelling (`DVT_SUSPECTED`), saddle numbness or bowel incontinence
+(`NEURAXIAL_HEMATOMA`), facial and tongue swelling (`ANAPHYLAXIS_LATE`), muscle rigidity or dark
+urine (`MH_SUSPECTED`), or a soaked dressing (`SURGICAL_BLEEDING`) — so those rules could not have
+been written at all, and the RED set would have shipped knowingly incomplete against a 100%
+recall gate.
+
+The versioning convention says a revision ships as a `_v2` set rather than an edit. It was extended
+in place anyway, because that convention exists to protect **clinician sign-off**, and this
+vocabulary has never been signed off — its own docstring calls it a v1 draft pending review — nor
+is there a single stored row to invalidate. Shipping a parallel `_v2` enum with a discriminator on
+`TurnExtraction` would have bought version safety for content nobody has reviewed. The convention
+starts binding at sign-off. `tests/test_domain.py` pins the full value set, so the change had to be
+deliberate.
+
+Two of the new groups are split on cause rather than anatomy, which is why `eye_irritation` does
+not sit with the dental codes: **procedural instrumentation injury** (`dental_injury`,
+`tongue_laceration`) is caused by the airway device, while **exposure / positioning injury**
+(`eye_irritation`) is caused by incomplete lid closure and a lost blink reflex under anesthesia.
+That is why a corneal abrasion turns up after cases involving no airway device at all, and the
+split keeps the vocabulary honest about which mechanism a finding implicates.
+
+**Topic-scoped rules could not catch a volunteered red flag** — *resolved: added `global_rules`.*
+See [safety-rules.md](safety-rules.md#two-scopes-topic-rules-and-global-rules). Four RED rules
+belonged to no topic and could never have fired; a patient volunteering chest pain during the
+satisfaction survey would have been missed entirely.
+
 **No length cap on `Summary.headline`** — *resolved: added the spec's 140-character cap.*
 `headline` now sets `max_length=140` in [`app/domain/schemas.py`](../app/domain/schemas.py), since
 it is the only thing read for a Tier 3 case.

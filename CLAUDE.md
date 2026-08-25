@@ -62,15 +62,19 @@ Strict separation between **LLM-driven conversation** and **deterministic clinic
 safety-critical decisions never depend solely on model output:
 
 - `app/protocol/` — the check-in *script*. `definitions/*.yaml` (e.g. `postop_v1.yaml`) is a
-  clinician-editable protocol defining conversation topics/questions; `loader.py` parses it;
-  `engine.py` is the state machine deciding which topic is active and when to advance.
+  clinician-editable protocol defining conversation topics/questions; `loader.py` parses and
+  validates it; `engine.py` is the state machine deciding which topic is active and when to
+  advance. **`engine.py` names no topic and no slot** — it walks a queue built from the YAML, so
+  adding a topic is a YAML edit and nothing else. A test asserts the absence of those literals.
 - `app/llm/` — the LLM boundary. `client.py` wraps the Anthropic SDK; `turn.py` takes one patient
   message + protocol state and produces a `TurnExtraction` (structured data pulled from the
   message) plus a draft reply; `prompts/*.md` are versioned prompt templates (`system_v1.md`,
   `turn_v1.md`, `summary_v1.md`) matched to protocol/rules versions.
 - `app/safety/` — deterministic, clinician-reviewable red-flag rules, independent of the LLM.
-  `rules/postop_v1.yaml` defines rules; `rules.py` evaluates them against extracted data;
-  `templates.py` holds fixed escalation copy (not LLM-generated, for predictability).
+  `rules/postop_v1.yaml` defines rules plus the always-on `global_rules` list; `rules.py` evaluates
+  them against extracted data; `templates.py` holds fixed escalation copy (not LLM-generated, for
+  predictability). Every rule and template carries `sme_reviewed: false` until a clinician signs it
+  off, and a test asserts none has been flipped.
 - `app/triage/tiering.py` — deterministic Tier 1/2/3 assignment from safety rule outcomes.
 - `app/summary/generator.py` — builds the clinician-facing summary of a completed check-in.
 - `app/domain/` — shared types: `enums.py` (`AnesthesiaType`, `BlockType`, `Severity`, `Route`,

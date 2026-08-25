@@ -119,11 +119,37 @@ class MedicationReport(BaseModel):
     quote: str | None = None
 
 
+class SlotValue(BaseModel):
+    """One protocol slot answered in one turn.
+
+    The protocol's slots are declared in YAML, so they cannot each be a field on
+    `TurnExtraction` — a new topic would mean a new model and a stored-format
+    change. They live in a dict keyed by slot id instead, which is what lets a
+    clinician add a topic without a developer touching Python.
+
+    `confidence` is load-bearing rather than decorative: the protocol engine only
+    counts a slot as filled at or above the protocol's threshold, and a topic that
+    repeatedly falls short exits on `max_turns`, which is itself a triage signal.
+    """
+
+    value: bool | int | float | str | None = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    quote: str | None = Field(default=None, description="Patient's own words, for the audit trail.")
+
+
 class TurnExtraction(BaseModel):
     """Everything one LLM call pulled out of a single patient message.
 
     Contains no decisions — only what the patient said, normalized. The protocol
     engine and safety rules read this and decide what happens next.
+
+    Two parallel views of the same message, filled by the same call. The clinical
+    fields (`pain`, `symptoms`, `medications`, `temperature_f`) are a fixed schema
+    the safety rules evaluate against, identical on every turn regardless of topic.
+    `slot_values` is the dynamic half: whatever the active topic declared. A slot
+    may declare a `maps_to` path into the clinical fields, in which case the engine
+    backfills it rather than making the agent ask a question it already has the
+    answer to.
     """
 
     # --- Provenance -------------------------------------------------------
@@ -138,9 +164,30 @@ class TurnExtraction(BaseModel):
     medications: list[MedicationReport] = Field(default_factory=list)
     temperature_f: float | None = Field(default=None, description="Self-reported, if given.")
 
+    # --- Protocol answers -------------------------------------------------
+    slot_values: dict[str, SlotValue] = Field(
+        default_factory=dict,
+        description="Answers to the active topic's declared slots, keyed by slot id.",
+    )
+
     # --- Conversation signals ---------------------------------------------
     # The model reports these; the protocol engine decides what to do about them.
     question_answered: bool = False
+    patient_question: str | None = Field(
+        default=None,
+        description=(
+            "A question the patient asked, verbatim. Left unanswered it is a Tier 2 "
+            "signal on its own, so it has to survive the turn as text."
+        ),
+    )
+    proxy_detected: bool = Field(
+        default=False,
+        description=(
+            "Someone other than the patient is answering. Answers become second-hand, "
+            "so a proxy conversation with any yellow finding is Tier 1."
+        ),
+    )
+    off_topic: bool = False
     patient_requests_human: bool = False
     patient_distress: bool = False
     unparseable: bool = False
@@ -161,6 +208,15 @@ class TurnExtraction(BaseModel):
             if observation.code is code:
                 return observation
         return SymptomObservation(code=code, presence=Presence.UNKNOWN)
+
+    def slot(self, slot_id: str) -> SlotValue:
+        """The answer to `slot_id`, or an empty zero-confidence one if unanswered.
+
+        Same fail-closed reasoning as `symptom`: an unanswered slot reads as a
+        `None` value at confidence 0, never as a falsy answer, so a rule testing
+        `is_false` cannot fire because the question was never asked.
+        """
+        return self.slot_values.get(slot_id, SlotValue())
 
 
 class Finding(BaseModel):

@@ -1,4 +1,503 @@
 # THE SCRIPT — clinician-editable
-# TODO: define post-op check-in protocol topics/questions
+#
+# The post-op anesthesia follow-up check-in, as data. Nothing in app/protocol/engine.py
+# names a topic or a slot: the engine builds a queue from `topics` below and walks it
+# until every applicable topic is satisfied. Adding a topic is an edit to this file
+# alone.
+#
+# TOPIC FIELDS
+#   id               stable identifier; referenced by findings, evals and turn analysis
+#   applicable_when  whether this topic is in the conversation at all (see below)
+#   goal             plain-English intent, given to the LLM as context for phrasing
+#   opening_question clinician-authored seed the LLM paraphrases; also the literal
+#                    fallback when an LLM call fails, so a topic can always be asked
+#   slots            what the topic must learn (see below)
+#   rules            safety rule IDs evaluated while this topic is active. The
+#                    `global_rules` in the safety rules file are evaluated on every
+#                    turn regardless, so nothing here needs to repeat them.
+#   max_turns        hard cap; exiting on this rather than on slot satisfaction is
+#                    itself a Tier 2 signal
+#   on_fail          `advance` (default) or `terminate_politely`
+#
+# APPLICABLE_WHEN — a structured predicate, never an expression to evaluate:
+#   {always: true}
+#   {case_field: block_type, is_null: false}
+#   {case_field: anesthesia_type, equals: local}
+#   {case_field: anesthesia_type, in: [spinal, epidural, combined_spinal_epidural]}
+# Field names and values are checked against the real case fields and enums at load,
+# so a typo is a startup error rather than a topic that silently never applies.
+#
+# SLOTS — one list, each entry carrying its own `required` flag, so a slot definition
+# can never drift out of a separate required-ids list.
+#   id            unique across the whole protocol (all slots share one answer dict)
+#   required      the topic is not satisfied until every required slot is filled
+#   type          bool | int | float | enum | text
+#   min/max       bounds for int/float; `values` for enum
+#   prompt_hint   what the model is being asked to determine
+#   maps_to       optional path into the turn's clinical fields. One direction only:
+#                 when the model filled the clinical field but left the slot empty,
+#                 the engine backfills the slot rather than re-asking a question it
+#                 already has the answer to. When both are present and disagree, the
+#                 conflict is recorded and extraction confidence drops.
+#
+# v1 DRAFT — the rule references are pending clinical sign-off. See docs/roadmap.md.
+
+protocol_id: postop_followup
 version: 1
-topics: []
+
+# Protocol, rules and prompts are versioned in lockstep. The loader refuses to start
+# if the rules file disagrees, so a half-upgraded pair cannot run.
+rules_version: postop_v1
+prompt_version: v1
+
+# A slot only counts as filled at or above this confidence. A topic that keeps
+# extracting below it runs out of turns instead, which is a triage signal.
+slot_confidence_threshold: 0.6
+
+# Backstop against a conversation that never terminates. Reaching it abandons the
+# conversation, which is Tier 1 if any symptom is unresolved.
+max_total_turns: 60
+
+
+# --- Satisfaction question sets ------------------------------------------------
+#
+# The experience survey is the QA/QC and quality-metrics channel, and the question
+# set is meant to differ per site. It is therefore a named, versioned block rather
+# than fixed slots: a site swaps the `question_set` reference on the `satisfaction`
+# topic and the whole survey changes with no code edit and no version bump of the
+# clinical topics.
+#
+# The loader expands these into ordinary slots — likert_5 -> int 1-5, yes_no -> bool,
+# scale_0_10 -> int 0-10, free_text -> text — so the engine handles the satisfaction
+# topic with exactly the same code path as every other topic.
+#
+# Survey answers are never clinical. No safety rules attach to the topic and no
+# answer here can move the triage tier; a red flag volunteered mid-survey is caught
+# by the always-on global rules instead.
+
+question_sets:
+  site_default:
+    version: 1
+    label: Default post-op anesthesia experience survey
+    questions:
+      - id: satisfaction_response
+        required: true
+        response_type: likert_5
+        text: >
+          Overall, how satisfied were you with the anesthesia care you received —
+          very satisfied, satisfied, neutral, dissatisfied, or very dissatisfied?
+      - id: anesthesia_options_explained
+        required: true
+        response_type: yes_no
+        text: Before your surgery, did someone explain your anesthesia options to you?
+      - id: anesthesia_risks_explained
+        required: true
+        response_type: yes_no
+        text: Did someone explain the risks of the anesthesia to you?
+      - id: satisfaction_comment
+        required: false
+        response_type: free_text
+        text: Is there anything we could have done better?
+
+
+# --- Topics, in order ----------------------------------------------------------
+
+topics:
+
+  # 1 ---------------------------------------------------------------------------
+  - id: identity_consent
+    applicable_when: {always: true}
+    max_turns: 3
+    on_fail: terminate_politely
+    goal: >
+      Confirm we are speaking with the patient or an authorized proxy, disclose that
+      this is an automated check-in, and set expectations for the conversation.
+      Asking the patient to state their name and date of birth is sufficient.
+    opening_question: >
+      Hello — this is an automated check-in from your care team about your recent
+      surgery. I'm an AI assistant, not a nurse or doctor. Before we start, can you
+      tell me your name and date of birth?
+    rules: []
+    slots:
+      - id: identity_confirmed
+        required: true
+        type: bool
+        prompt_hint: has the person given a name and date of birth matching the case
+      - id: is_proxy
+        required: true
+        type: bool
+        maps_to: proxy_detected
+        prompt_hint: is someone other than the patient answering on their behalf
+      - id: consent_to_continue
+        required: true
+        type: bool
+        prompt_hint: has the person agreed to continue with the check-in
+
+  # 2 ---------------------------------------------------------------------------
+  - id: open_checkin
+    applicable_when: {always: true}
+    max_turns: 2
+    goal: >
+      Let the patient's own concern surface first, before any closed questions steer
+      them. Also confirm which operation they had.
+    opening_question: Thanks. How have you been feeling since your operation?
+    rules: []
+    slots:
+      - id: patient_reported_concerns
+        required: true
+        type: text
+        prompt_hint: what the patient raised in their own words, or that they raised nothing
+      - id: procedure_confirmed
+        required: false
+        type: bool
+        prompt_hint: did the patient describe the operation on file
+
+  # 3 ---------------------------------------------------------------------------
+  - id: pain
+    applicable_when: {always: true}
+    max_turns: 6
+    goal: >
+      Quantify pain on the 0-10 scale, find out whether the prescribed medication is
+      working, and screen for pain that does not fit the operation they had.
+    opening_question: On a scale of 0 to 10, how bad is your pain right now?
+    rules:
+      - PAIN_SEVERE_UNRESPONSIVE
+      - PAIN_ATYPICAL_SITE
+      - COMPARTMENT_SYNDROME
+      - DVT_SUSPECTED
+      - APAP_STACKING
+      - MED_NONADHERENCE
+      - OPIOID_SEDATIVE_COMBO
+    slots:
+      - id: pain_score_now
+        required: true
+        type: int
+        min: 0
+        max: 10
+        maps_to: pain.score
+        prompt_hint: current pain on the 0-10 scale
+      - id: pain_med_taken
+        required: true
+        type: bool
+        prompt_hint: has the patient taken the pain medication they were prescribed
+      - id: pain_location_expected
+        required: true
+        type: bool
+        prompt_hint: >
+          is the pain where this operation would be expected to hurt. Judge against
+          the procedure on file; do not ask the patient to make this judgement.
+      - id: pain_score_worst
+        required: false
+        type: int
+        min: 0
+        max: 10
+        maps_to: pain.worst_score
+        prompt_hint: worst pain since discharge, on the 0-10 scale
+      - id: hours_since_last_dose
+        required: false
+        type: float
+        min: 0
+        prompt_hint: hours since the last dose of pain medication
+      - id: med_effectiveness
+        required: false
+        type: enum
+        values: [none, partial, good]
+        prompt_hint: how much relief the medication gives
+
+  # 4 ---------------------------------------------------------------------------
+  - id: ponv
+    applicable_when: {always: true}
+    max_turns: 5
+    goal: >
+      Distinguish queasiness from actual vomiting, and find out whether they are
+      keeping fluids down and passing urine.
+    opening_question: Have you felt sick to your stomach or thrown up since you got home?
+    rules:
+      - PONV_INTRACTABLE
+      - DEHYDRATION_RISK
+    slots:
+      - id: nausea_present
+        required: true
+        type: bool
+        maps_to: symptom.nausea.presence
+        prompt_hint: is the patient nauseated
+      - id: vomiting_present
+        required: true
+        type: bool
+        maps_to: symptom.vomiting.presence
+        prompt_hint: has the patient actually vomited, as distinct from feeling queasy
+      - id: tolerating_fluids
+        required: true
+        type: bool
+        prompt_hint: can the patient keep fluids down
+      - id: antiemetic_available
+        required: false
+        type: bool
+        prompt_hint: was the patient sent home with anti-nausea medication
+      - id: antiemetic_taken
+        required: false
+        type: bool
+        prompt_hint: has the patient taken the anti-nausea medication they have
+      - id: last_urination
+        required: false
+        type: float
+        min: 0
+        prompt_hint: hours since the patient last passed urine
+
+  # 5 ---------------------------------------------------------------------------
+  - id: cardioresp
+    applicable_when: {always: true}
+    max_turns: 4
+    goal: Screen for respiratory and cardiac complications.
+    opening_question: Have you had any trouble breathing, or any chest pain, since your surgery?
+    rules:
+      - RESP_DISTRESS
+      - CHEST_PAIN
+      - SYNCOPE
+      - OVERSEDATION
+    slots:
+      - id: breathing_difficulty
+        required: true
+        type: bool
+        maps_to: symptom.shortness_of_breath.presence
+        prompt_hint: is the patient short of breath or having trouble breathing
+      - id: chest_pain
+        required: true
+        type: bool
+        maps_to: symptom.chest_pain.presence
+        prompt_hint: does the patient have chest pain or pressure
+      - id: lightheaded_syncope
+        required: true
+        type: bool
+        maps_to: symptom.syncope.presence
+        prompt_hint: has the patient fainted, or nearly fainted, since discharge
+
+  # 6 ---------------------------------------------------------------------------
+  - id: block_regression
+    applicable_when: {case_field: block_type, is_null: false}
+    max_turns: 6
+    goal: >
+      Assess how far sensation and movement have come back against the expected
+      window for this block, and catch a prolonged deficit or local anesthetic
+      toxicity.
+    opening_question: >
+      Your nerve block should be wearing off by now — has the feeling started
+      coming back in that area?
+    rules:
+      - BLOCK_PROLONGED
+      - BLOCK_NEW_DEFICIT
+      - LAST_SYMPTOMS
+      - CATHETER_SITE_INFECTION
+      - PHRENIC_DYSPNEA
+      - REBOUND_PAIN
+    slots:
+      - id: sensation_returning
+        required: true
+        type: bool
+        prompt_hint: has feeling started to come back in the blocked area
+      - id: motor_function
+        required: true
+        type: enum
+        values: [normal, weak, absent]
+        prompt_hint: how much movement the patient has in the blocked limb
+      - id: hours_since_block
+        required: true
+        type: float
+        min: 0
+        prompt_hint: >
+          hours since the block was placed. Prefer the case record; only ask the
+          patient if it is unavailable.
+      - id: tingling_present
+        required: false
+        type: bool
+        prompt_hint: pins and needles, which is normal during regression
+      - id: catheter_site_status
+        required: false
+        type: enum
+        values: [no_catheter, clean, red, draining, leaking]
+        prompt_hint: appearance of the nerve catheter site, if one is in place
+      - id: rebound_pain
+        required: false
+        type: bool
+        prompt_hint: severe pain arriving abruptly as the block wears off
+
+  # 7 ---------------------------------------------------------------------------
+  - id: neuraxial_screen
+    applicable_when:
+      case_field: anesthesia_type
+      in: [spinal, epidural, combined_spinal_epidural]
+    max_turns: 6
+    goal: >
+      Screen for post-dural-puncture headache, and for the two time-critical
+      neuraxial emergencies — epidural hematoma and abscess.
+    opening_question: Have you had a headache since your spinal or epidural?
+    rules:
+      - PDPH_SUSPECTED
+      - PDPH_WITH_RED_FLAGS
+      - NEURAXIAL_HEMATOMA
+      - URINARY_RETENTION
+    slots:
+      - id: headache_present
+        required: true
+        type: bool
+        prompt_hint: does the patient have a headache of any kind
+      - id: leg_weakness
+        required: true
+        type: bool
+        maps_to: symptom.motor_weakness.presence
+        prompt_hint: new or worsening weakness in the legs
+      - id: bladder_function
+        required: true
+        type: enum
+        values: [normal, difficulty, unable]
+        prompt_hint: whether the patient can pass urine normally
+      - id: headache_positional
+        required: false
+        type: bool
+        maps_to: symptom.postural_headache.presence
+        prompt_hint: >
+          is the headache worse sitting or standing and better lying flat — the
+          feature that distinguishes PDPH from an ordinary headache
+      - id: visual_changes
+        required: false
+        type: bool
+        maps_to: symptom.visual_changes.presence
+        prompt_hint: blurred or double vision
+      - id: back_pain_new
+        required: false
+        type: bool
+        maps_to: symptom.back_pain_at_injection_site.presence
+        prompt_hint: new or severe back pain at the injection site
+      - id: fever
+        required: false
+        type: bool
+        maps_to: symptom.fever.presence
+        prompt_hint: fever or chills
+
+  # 8 ---------------------------------------------------------------------------
+  - id: anesthesia_recovery
+    # Deliberately `always`, overriding the drafted anesthesia-type condition. If any
+    # of these happened it needs to be known, and MAC and general anesthesia carry the
+    # same complications even though only one involves an airway device.
+    applicable_when: {always: true}
+    max_turns: 5
+    goal: >
+      Screen for airway, dental, ocular and prolonged cognitive after-effects.
+      NEVER ask the patient what type of anesthesia they received — the doctor may
+      not have told them, and the answer is on file anyway. Ask about the symptoms
+      directly.
+    opening_question: Has your throat been sore, or have you felt groggy or foggy since the surgery?
+    rules:
+      - AIRWAY_INJURY
+      - DENTAL_INJURY
+      - POSTOP_DELIRIUM
+      - CORNEAL_ABRASION
+    slots:
+      - id: sore_throat
+        required: true
+        type: bool
+        maps_to: symptom.sore_throat.presence
+        prompt_hint: sore throat since the operation
+      - id: grogginess_confusion
+        required: true
+        type: bool
+        maps_to: symptom.confusion.presence
+        prompt_hint: grogginess, fogginess or confusion since the operation
+      - id: dental_injury
+        required: false
+        type: bool
+        maps_to: symptom.dental_injury.presence
+        prompt_hint: chipped, loosened or broken tooth
+      - id: hoarseness
+        required: false
+        type: bool
+        maps_to: symptom.hoarseness.presence
+        prompt_hint: hoarse or changed voice
+      - id: eye_irritation
+        required: false
+        type: bool
+        maps_to: symptom.eye_irritation.presence
+        prompt_hint: gritty, painful or watering eye
+      - id: swallowing_difficulty
+        required: false
+        type: bool
+        maps_to: symptom.difficulty_swallowing.presence
+        prompt_hint: pain or difficulty swallowing
+      - id: tongue_laceration
+        required: false
+        type: bool
+        maps_to: symptom.tongue_laceration.presence
+        prompt_hint: cut or bitten tongue or lip
+
+  # 9 ---------------------------------------------------------------------------
+  - id: local_only_recovery
+    applicable_when: {case_field: anesthesia_type, equals: local}
+    max_turns: 5
+    goal: >
+      Confirm the local anesthetic has worn off. That is the main thing for these
+      patients; the airway and ocular questions are covered by anesthesia_recovery,
+      which runs for everyone.
+    opening_question: Has the numbness from the local anesthetic worn off yet?
+    rules:
+      - PERSISTENT_LOCAL
+    slots:
+      - id: persistent_numbness
+        required: true
+        type: bool
+        maps_to: symptom.persistent_numbness.presence
+        prompt_hint: is the area still numb
+
+  # 10 --------------------------------------------------------------------------
+  - id: patient_questions
+    applicable_when: {always: true}
+    max_turns: 5
+    goal: >
+      Answer questions about how the anesthesia wears off and what to expect. Defer
+      anything clinical to the care team and say plainly that you cannot answer it —
+      an unanswered question is logged and raises the conversation to Tier 2, which
+      is the intended outcome, not a failure.
+    opening_question: Do you have any questions about your anesthesia or how you're recovering?
+    rules: []
+    slots:
+      - id: questions_answered_or_deferred
+        required: true
+        type: bool
+        prompt_hint: >
+          has every question the patient raised been either answered or explicitly
+          deferred to the care team
+
+  # 11 --------------------------------------------------------------------------
+  - id: satisfaction
+    applicable_when: {always: true}
+    # protocol.md specifies 2 turns, but three required questions cannot be asked in
+    # two turns while honouring the one-question-at-a-time constraint. Raised to 4 so
+    # that constraint stays unqualified.
+    max_turns: 4
+    goal: >
+      Capture experience feedback. This is the QA/QC and quality-metrics channel, so
+      ask every required question in the site's set even when the patient is brief.
+      Nothing here is clinical and nothing here changes the triage tier.
+    opening_question: Last few questions, about your experience rather than your recovery.
+    question_set: site_default
+    rules: []
+
+  # 12 --------------------------------------------------------------------------
+  - id: close
+    applicable_when: {always: true}
+    max_turns: 3
+    goal: >
+      Deliver the safety-netting instructions — what would mean call the surgeon, and
+      what would mean call 911 — and confirm the patient can repeat them back.
+    opening_question: >
+      Before we finish: if your pain suddenly gets much worse, you have trouble
+      breathing, or you have chest pain, call 911. For anything else that worries
+      you, call your surgeon's office. Can you tell me back what you'd do if your
+      breathing got worse?
+    rules: []
+    slots:
+      - id: understanding_confirmed
+        required: true
+        type: bool
+        prompt_hint: >
+          did the patient repeat back the safety-netting instructions in their own
+          words, rather than only saying yes

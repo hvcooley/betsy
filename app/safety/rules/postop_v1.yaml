@@ -1,6 +1,47 @@
 # Rule definitions — clinician-reviewable
-# TODO: define red-flag rules
+#
+# Every escalation decision this product makes comes from this file. Rules are
+# evaluated deterministically against the validated structured fields of one turn,
+# never against the patient's free text, and never by the model.
+#
+# RULE FIELDS
+#   id             referenced by protocol topics, findings, escalations and evals
+#   band           red    stop the conversation, discard the drafted reply, send the
+#                         fixed template below, mark the conversation escalated
+#                  yellow record a finding and carry on
+#                  green  an expected finding: supplies approved reassurance language
+#                         and produces no finding at all
+#   severity       how bad the symptom is (Severity)
+#   tier           must agree with the band (red->1, yellow->2, green->3); checked at load
+#   routes         every action the rule demands. A list, because one rule can owe two
+#                  different people: a soaking dressing is ED_NOW *and* CALL_SURGEON.
+#                  Never reduce a rule to whichever of its routes is most urgent —
+#                  that drops an owner. One escalation row is written per route.
+#   label          the clinician-facing one-liner shown on the finding
+#   template_key   key into app/safety/templates.py for the patient-facing copy
+#   sme_reviewed   false until an anesthesiologist has signed this rule off
+#   when           the condition (see below)
+#
+# CONDITIONS — a closed vocabulary of predicates, combined with all/any/not:
+#   {symptom: chest_pain, presence: present}          also: min_severity, onset_hours_within
+#   {pain: {score_gte: 8, controlled_by_medication: false}}
+#   {medication: {name_any: [tylenol], adherence: as_prescribed, last_dose_hours_lt: 6}}
+#   {temperature_f_gte: 100.4}
+#   {slot: tolerating_fluids, is_false: true}         also: equals, in, gte, lte, is_true
+#   {case: {anesthesia_type_in: [spinal]}}            also: block_type_in, has_block
+#   {block_regression_exceeded: true}                 reads the table below
+#
+# FAIL-CLOSED SEMANTICS, because silence is not a denial:
+#   - `presence: absent` matches only an explicit denial. UNKNOWN never satisfies it.
+#   - `not` over a missing value is FALSE, not true, so a negation cannot fire off an
+#     empty extraction.
+#   - an unanswered slot reads as None, never as false.
+#
+# v1 DRAFT — pending clinical sign-off. Every rule carries sme_reviewed: false.
+# Do not build the summary, eval or UI phases on top of this until that changes.
+# See docs/roadmap.md.
 version: 1
+rules_version: postop_v1
 
 # Expected block regression windows. Drives BLOCK_PROLONGED: a sensory or motor
 # deficit still present past `flag_after_hours` is a YELLOW finding.
@@ -47,4 +88,589 @@ block_regression:
 # guessing here would flag real prolonged blocks as normal.
 block_adjuvants: {}
 
-rules: []
+
+# Rules evaluated on EVERY turn, whatever topic is active.
+#
+# A topic's `rules` list only fires while that topic is being asked about, which is
+# right for questions the agent went looking for. It is wrong for a patient who
+# volunteers chest pain during the satisfaction survey, or mentions a soaking
+# dressing while answering about nausea — the topic that would have caught it may
+# have already gone by. These are the rules whose subject matter is catastrophic
+# whenever it is mentioned, so they are always live.
+#
+# This extends the spec's topic-scoped model. See docs/safety-rules.md.
+global_rules:
+  - RESP_DISTRESS
+  - CHEST_PAIN
+  - ANAPHYLAXIS_LATE
+  - MH_SUSPECTED
+  - SURGICAL_BLEEDING
+  - SUICIDAL_IDEATION
+  - OVERSEDATION
+
+
+rules:
+
+  # === RED — stop the conversation, escalate immediately =======================
+
+  - id: RESP_DISTRESS
+    band: red
+    severity: severe
+    tier: tier_1
+    routes: [call_911]
+    label: Respiratory distress — shortness of breath, stridor or airway compromise
+    template_key: red_resp_distress
+    sme_reviewed: false
+    when:
+      any:
+        - {symptom: shortness_of_breath, presence: present, min_severity: moderate}
+        - {symptom: stridor, presence: present}
+        - {symptom: drooling, presence: present}
+        - all:
+            - {symptom: difficulty_swallowing, presence: present}
+            - {symptom: shortness_of_breath, presence: present}
+
+  - id: CHEST_PAIN
+    band: red
+    severity: severe
+    tier: tier_1
+    routes: [call_911]
+    label: Chest pain or pressure after surgery
+    template_key: red_chest_pain
+    sme_reviewed: false
+    when:
+      any:
+        - {symptom: chest_pain, presence: present}
+        - all:
+            - {symptom: palpitations, presence: present}
+            - {symptom: syncope, presence: present}
+
+  - id: SYNCOPE
+    band: red
+    severity: severe
+    tier: tier_1
+    routes: [ed_now]
+    label: Fainting or near-fainting after surgery
+    template_key: red_syncope
+    # OPEN: referenced by the cardioresp topic but absent from both the RED and the
+    # YELLOW tables in the spec, which only covers "palpitations with syncope" under
+    # CHEST_PAIN. Shipped RED/ED_NOW on the recall-over-precision principle. Needs an
+    # SME decision on band and route — see docs/roadmap.md.
+    sme_reviewed: false
+    when:
+      any:
+        - {symptom: syncope, presence: present}
+        - {slot: lightheaded_syncope, is_true: true}
+
+  - id: LAST_SYMPTOMS
+    band: red
+    severity: severe
+    tier: tier_1
+    routes: [call_911]
+    label: Possible local anesthetic systemic toxicity in a patient with a block
+    template_key: red_last
+    sme_reviewed: false
+    when:
+      all:
+        - {case: {has_block: true}}
+        - any:
+            - {symptom: perioral_numbness, presence: present}
+            - {symptom: metallic_taste, presence: present}
+            - {symptom: tinnitus, presence: present}
+            - all:
+                - {symptom: dizziness, presence: present}
+                - {symptom: confusion, presence: present}
+
+  - id: NEURAXIAL_HEMATOMA
+    band: red
+    severity: severe
+    tier: tier_1
+    routes: [ed_now]
+    label: Possible epidural hematoma or abscess — time-critical surgical window
+    template_key: red_neuraxial_hematoma
+    sme_reviewed: false
+    when:
+      all:
+        - {case: {anesthesia_type_in: [spinal, epidural, combined_spinal_epidural]}}
+        - any:
+            - {symptom: motor_weakness, presence: present}
+            - {symptom: saddle_numbness, presence: present}
+            - {symptom: bowel_incontinence, presence: present}
+            - {slot: bladder_function, equals: unable}
+            - {symptom: back_pain_at_injection_site, presence: present, min_severity: severe}
+
+  - id: COMPARTMENT_SYNDROME
+    band: red
+    severity: severe
+    tier: tier_1
+    routes: [ed_now]
+    label: Possible compartment syndrome — pain out of proportion in a splinted limb
+    template_key: red_compartment_syndrome
+    sme_reviewed: false
+    when:
+      any:
+        - {symptom: pain_on_passive_stretch, presence: present}
+        - all:
+            - {pain: {score_gte: 8, controlled_by_medication: false}}
+            - {symptom: limb_tightness, presence: present}
+        - all:
+            - {pain: {score_gte: 8}}
+            - {slot: pain_location_expected, is_false: true}
+            - {symptom: limb_tightness, presence: present}
+
+  - id: PDPH_WITH_RED_FLAGS
+    band: red
+    severity: severe
+    tier: tier_1
+    routes: [ed_now]
+    label: Postural headache after neuraxial with visual change, neck stiffness or fever
+    template_key: red_pdph_with_red_flags
+    # The spec routes PDPH "ED_NOW or CALL_ANESTHESIA per severity". A severity split
+    # is not expressible in one rule row, so it is two rules: this one, and the
+    # CALL_ANESTHESIA rule below for an isolated postural headache.
+    sme_reviewed: false
+    when:
+      all:
+        - {case: {anesthesia_type_in: [spinal, epidural, combined_spinal_epidural]}}
+        - {symptom: postural_headache, presence: present}
+        - any:
+            - {symptom: visual_changes, presence: present}
+            - {symptom: neck_stiffness, presence: present}
+            - {symptom: fever, presence: present}
+            - {temperature_f_gte: 100.4}
+
+  - id: PDPH_SUSPECTED
+    band: red
+    severity: moderate
+    tier: tier_1
+    routes: [call_anesthesia]
+    label: Suspected post-dural-puncture headache
+    template_key: red_pdph_suspected
+    sme_reviewed: false
+    when:
+      all:
+        - {case: {anesthesia_type_in: [spinal, epidural, combined_spinal_epidural]}}
+        - any:
+            - {symptom: postural_headache, presence: present}
+            - {slot: headache_positional, is_true: true}
+
+  - id: PONV_INTRACTABLE
+    band: red
+    severity: severe
+    tier: tier_1
+    routes: [ed_now]
+    label: Vomiting with no oral intake tolerated, or no urine output
+    template_key: red_ponv_intractable
+    sme_reviewed: false
+    when:
+      any:
+        - all:
+            - {symptom: vomiting, presence: present}
+            - {slot: tolerating_fluids, is_false: true}
+        - {symptom: unable_to_tolerate_fluids, presence: present}
+        - {symptom: no_urine_output, presence: present}
+        - {slot: last_urination, gte: 12}
+
+  - id: OVERSEDATION
+    band: red
+    severity: severe
+    tier: tier_1
+    routes: [call_911]
+    label: Patient difficult to rouse
+    template_key: red_oversedation
+    sme_reviewed: false
+    when:
+      any:
+        - {symptom: excessive_sedation, presence: present, min_severity: severe}
+        - all:
+            - {symptom: excessive_sedation, presence: present}
+            - {symptom: shortness_of_breath, presence: present}
+
+  - id: ANAPHYLAXIS_LATE
+    band: red
+    severity: severe
+    tier: tier_1
+    routes: [call_911]
+    label: Possible late allergic reaction — spreading rash or facial swelling
+    template_key: red_anaphylaxis
+    sme_reviewed: false
+    when:
+      any:
+        - {symptom: facial_swelling, presence: present}
+        - {symptom: tongue_swelling, presence: present}
+        - {symptom: allergic_reaction, presence: present}
+        - all:
+            - {symptom: rash, presence: present}
+            - {symptom: shortness_of_breath, presence: present}
+
+  - id: MH_SUSPECTED
+    band: red
+    severity: severe
+    tier: tier_1
+    routes: [call_911]
+    label: Possible malignant hyperthermia — fever with muscle rigidity
+    template_key: red_mh
+    sme_reviewed: false
+    when:
+      all:
+        - {symptom: muscle_rigidity, presence: present}
+        - any:
+            - {symptom: fever, presence: present}
+            - {temperature_f_gte: 100.4}
+            - {symptom: dark_urine, presence: present}
+
+  - id: DVT_SUSPECTED
+    band: red
+    severity: severe
+    tier: tier_1
+    routes: [ed_now]
+    label: Possible deep vein thrombosis — unilateral calf pain with swelling
+    template_key: red_dvt
+    sme_reviewed: false
+    when:
+      all:
+        - {symptom: calf_pain, presence: present}
+        - {symptom: calf_swelling, presence: present}
+
+  - id: SURGICAL_BLEEDING
+    band: red
+    severity: severe
+    tier: tier_1
+    # Two owners: the patient has to be seen, *and* the surgeon has to know it was
+    # their case. Reducing this to ED_NOW alone would leave the surgeon uninformed.
+    routes: [ed_now, call_surgeon]
+    label: Active surgical bleeding — soaked dressing or expanding hematoma
+    template_key: red_surgical_bleeding
+    sme_reviewed: false
+    when:
+      any:
+        - {symptom: dressing_soaked, presence: present}
+        - {symptom: expanding_hematoma, presence: present}
+        - {symptom: bleeding_at_site, presence: present, min_severity: severe}
+
+  - id: SUICIDAL_IDEATION
+    band: red
+    severity: severe
+    tier: tier_1
+    routes: [call_911]
+    label: Expression of self-harm — hand off to a human, provide crisis resources
+    template_key: red_suicidal_ideation
+    # OPEN: the spec says "human handoff, crisis resources" rather than naming a
+    # route, and there is no handoff route in the vocabulary. Routed CALL_911 as the
+    # fail-closed choice; the template leads with the 988 crisis line, which is the
+    # part that matters most. Needs an SME decision.
+    sme_reviewed: false
+    when:
+      any:
+        - {symptom: suicidal_ideation, presence: present}
+        - {patient_distress: true}
+
+  # === YELLOW — record a finding, continue, Tier 2 =============================
+
+  - id: PAIN_SEVERE_UNRESPONSIVE
+    band: yellow
+    severity: severe
+    tier: tier_2
+    routes: [call_surgeon]
+    label: Severe pain not controlled by the prescribed medication
+    template_key: null
+    sme_reviewed: false
+    when:
+      all:
+        - {pain: {score_gte: 8}}
+        - {slot: pain_med_taken, is_true: true}
+        - any:
+            - {pain: {controlled_by_medication: false}}
+            - {slot: med_effectiveness, in: [none, partial]}
+
+  - id: PAIN_ATYPICAL_SITE
+    band: yellow
+    severity: moderate
+    tier: tier_2
+    routes: [call_surgeon]
+    label: Pain in a location the operation does not explain
+    template_key: null
+    sme_reviewed: false
+    when:
+      {slot: pain_location_expected, is_false: true}
+
+  - id: BLOCK_PROLONGED
+    band: yellow
+    severity: moderate
+    tier: tier_2
+    routes: [call_anesthesia]
+    label: Block deficit persisting beyond the expected window for this block type
+    template_key: null
+    sme_reviewed: false
+    when:
+      all:
+        - {case: {has_block: true}}
+        - {block_regression_exceeded: true}
+        - any:
+            - {slot: sensation_returning, is_false: true}
+            - {slot: motor_function, in: [weak, absent]}
+            - {symptom: persistent_numbness, presence: present}
+
+  - id: BLOCK_NEW_DEFICIT
+    band: yellow
+    severity: severe
+    tier: tier_2
+    routes: [call_anesthesia]
+    label: New weakness after the block had already resolved
+    template_key: null
+    sme_reviewed: false
+    when:
+      all:
+        - {case: {has_block: true}}
+        - {slot: sensation_returning, is_true: true}
+        - any:
+            - {slot: motor_function, in: [weak, absent]}
+            - {symptom: motor_weakness, presence: present}
+
+  - id: CATHETER_SITE_INFECTION
+    band: yellow
+    severity: moderate
+    tier: tier_2
+    routes: [call_anesthesia]
+    label: Nerve catheter site red, draining or leaking
+    template_key: null
+    sme_reviewed: false
+    when:
+      any:
+        - {slot: catheter_site_status, in: [red, draining, leaking]}
+        - {symptom: catheter_site_drainage, presence: present}
+
+  - id: PHRENIC_DYSPNEA
+    band: yellow
+    severity: mild
+    tier: tier_2
+    routes: [call_anesthesia]
+    label: Mild breathlessness after an interscalene block — usually expected, still flagged
+    template_key: null
+    sme_reviewed: false
+    when:
+      all:
+        - {case: {block_type_in: [interscalene]}}
+        - {symptom: shortness_of_breath, presence: present, min_severity: mild}
+        - not: {symptom: shortness_of_breath, presence: present, min_severity: moderate}
+
+  - id: REBOUND_PAIN
+    band: yellow
+    severity: moderate
+    tier: tier_2
+    routes: [call_anesthesia]
+    label: Severe pain arriving abruptly as the block wore off
+    template_key: null
+    sme_reviewed: false
+    when:
+      all:
+        - {slot: rebound_pain, is_true: true}
+        - {pain: {score_gte: 7}}
+
+  - id: URINARY_RETENTION
+    band: yellow
+    severity: moderate
+    tier: tier_2
+    routes: [call_anesthesia]
+    label: Difficulty passing urine after neuraxial anesthesia
+    template_key: null
+    sme_reviewed: false
+    when:
+      any:
+        - {symptom: urinary_retention, presence: present}
+        - {slot: bladder_function, equals: difficulty}
+
+  - id: APAP_STACKING
+    band: yellow
+    severity: moderate
+    tier: tier_2
+    routes: [call_surgeon]
+    label: Acetaminophen taken alongside a combination opioid — risk of exceeding the daily limit
+    template_key: null
+    sme_reviewed: false
+    when:
+      all:
+        - {medication: {name_any: [tylenol, acetaminophen, paracetamol]}}
+        - {medication: {name_any: [percocet, norco, vicodin, oxycodone-acetaminophen,
+                                   hydrocodone-acetaminophen]}}
+
+  - id: MED_NONADHERENCE
+    band: yellow
+    severity: mild
+    tier: tier_2
+    routes: [routine]
+    label: Prescribed medication not being taken
+    template_key: null
+    sme_reviewed: false
+    when:
+      {medication: {adherence: not_taking}}
+
+  - id: OPIOID_SEDATIVE_COMBO
+    band: yellow
+    severity: moderate
+    tier: tier_2
+    routes: [call_surgeon]
+    label: Opioid taken alongside a sedative — additive respiratory depression
+    template_key: null
+    sme_reviewed: false
+    when:
+      all:
+        - {medication: {name_any: [oxycodone, hydrocodone, morphine, hydromorphone, tramadol,
+                                   percocet, norco, vicodin]}}
+        - {medication: {name_any: [alprazolam, xanax, lorazepam, ativan, diazepam, valium,
+                                   zolpidem, ambien, clonazepam, klonopin]}}
+
+  - id: POSTOP_DELIRIUM
+    band: yellow
+    severity: moderate
+    tier: tier_2
+    routes: [call_anesthesia]
+    label: Confusion persisting beyond the first post-operative day
+    template_key: null
+    sme_reviewed: false
+    when:
+      all:
+        - {symptom: confusion, presence: present}
+        - {case: {hours_post_op_gte: 24}}
+
+  - id: DENTAL_INJURY
+    band: yellow
+    severity: moderate
+    tier: tier_2
+    routes: [call_anesthesia]
+    label: Dental or oral injury, likely from airway instrumentation
+    template_key: null
+    sme_reviewed: false
+    when:
+      any:
+        - {symptom: dental_injury, presence: present}
+        - {symptom: tongue_laceration, presence: present}
+
+  - id: AIRWAY_INJURY
+    band: yellow
+    severity: moderate
+    tier: tier_2
+    routes: [call_anesthesia]
+    label: Throat symptoms beyond the expected mild sore throat
+    template_key: null
+    sme_reviewed: false
+    when:
+      any:
+        - {symptom: sore_throat, presence: present, min_severity: severe}
+        - {symptom: difficulty_swallowing, presence: present}
+        - {symptom: hoarseness, presence: present, onset_hours_within: 72, min_severity: moderate}
+
+  - id: CORNEAL_ABRASION
+    band: yellow
+    severity: moderate
+    tier: tier_2
+    routes: [call_anesthesia]
+    label: Eye pain or irritation — possible corneal abrasion from positioning
+    template_key: null
+    sme_reviewed: false
+    when:
+      {symptom: eye_irritation, presence: present}
+
+  - id: DEHYDRATION_RISK
+    band: yellow
+    severity: moderate
+    tier: tier_2
+    routes: [call_surgeon]
+    label: Poor oral intake with reduced urine output
+    template_key: null
+    sme_reviewed: false
+    when:
+      any:
+        - all:
+            - {slot: tolerating_fluids, is_false: true}
+            - not: {symptom: vomiting, presence: present}
+        - {slot: last_urination, gte: 8}
+
+  - id: PERSISTENT_LOCAL
+    band: yellow
+    severity: mild
+    tier: tier_2
+    routes: [call_anesthesia]
+    label: Local anesthetic numbness has not worn off
+    template_key: null
+    sme_reviewed: false
+    when:
+      all:
+        - {case: {anesthesia_type_in: [local]}}
+        - any:
+            - {slot: persistent_numbness, is_true: true}
+            - {symptom: persistent_numbness, presence: present}
+
+  # === GREEN — reassure with scripted language, no finding =====================
+  #
+  # These produce approved reassurance language for the drafted reply and never a
+  # finding, so they cannot reach the review queue. They exist so that the agent has
+  # sanctioned wording for the things patients find frightening but that are normal.
+
+  - id: EXPECTED_SORE_THROAT
+    band: green
+    severity: mild
+    tier: tier_3
+    routes: [routine]
+    label: Mild sore throat after airway instrumentation — expected
+    template_key: green_sore_throat
+    sme_reviewed: false
+    when:
+      all:
+        - {symptom: sore_throat, presence: present, min_severity: mild}
+        - not: {symptom: sore_throat, presence: present, min_severity: moderate}
+        - not: {symptom: difficulty_swallowing, presence: present}
+
+  - id: EXPECTED_HOARSENESS
+    band: green
+    severity: mild
+    tier: tier_3
+    routes: [routine]
+    label: Hoarseness in the first days after general anesthesia — expected
+    template_key: green_hoarseness
+    sme_reviewed: false
+    when:
+      all:
+        - {symptom: hoarseness, presence: present, min_severity: mild}
+        - not: {symptom: hoarseness, presence: present, min_severity: moderate}
+
+  - id: EXPECTED_BLOCK_TINGLING
+    band: green
+    severity: mild
+    tier: tier_3
+    routes: [routine]
+    label: Pins and needles during normal block regression — expected
+    template_key: green_block_tingling
+    sme_reviewed: false
+    when:
+      all:
+        - {case: {has_block: true}}
+        - {slot: tingling_present, is_true: true}
+        - not: {block_regression_exceeded: true}
+
+  - id: EXPECTED_DAY0_GROGGINESS
+    band: green
+    severity: mild
+    tier: tier_3
+    routes: [routine]
+    label: Grogginess on the day of surgery — expected
+    template_key: green_grogginess
+    sme_reviewed: false
+    when:
+      all:
+        - {symptom: confusion, presence: present, min_severity: mild}
+        - {case: {hours_post_op_lt: 24}}
+
+  - id: EXPECTED_MILD_NAUSEA
+    band: green
+    severity: mild
+    tier: tier_3
+    routes: [routine]
+    label: Mild nausea that is settling, with fluids tolerated — expected
+    template_key: green_mild_nausea
+    sme_reviewed: false
+    when:
+      all:
+        - {symptom: nausea, presence: present, min_severity: mild}
+        - {slot: tolerating_fluids, is_true: true}
+        - not: {symptom: vomiting, presence: present}

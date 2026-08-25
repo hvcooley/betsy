@@ -232,6 +232,40 @@ class Route(str, Enum):
         return cls.combine(values)[0]
 
 
+class RuleBand(str, Enum):
+    """What a safety rule does when it fires. Declared per rule in the rules YAML.
+
+    Distinct from both `Severity` (how bad the *symptom* is) and `Tier` (how urgent
+    the *conversation* is): a band is the rule's effect on the turn pipeline.
+
+    RED stops the conversation — the drafted LLM reply is discarded, fixed
+    clinician-authored copy is sent instead, and the protocol halts. YELLOW records
+    a finding and lets the conversation continue. GREEN is an expected post-op
+    finding that supplies approved reassurance language and produces no finding at
+    all, so it can never reach the review queue.
+    """
+
+    RED = "red"
+    YELLOW = "yellow"
+    GREEN = "green"
+
+    @property
+    def implied_tier(self) -> "Tier":
+        """The tier a finding in this band forces.
+
+        The rules loader checks each rule's declared `tier` against this, so a
+        `band: red` rule carrying `tier: tier_2` is a load error rather than an
+        inconsistency discovered when it fires. GREEN produces no finding, so it
+        maps to the least urgent tier and never raises one.
+        """
+        return _BAND_TIER[self]
+
+    @property
+    def halts_conversation(self) -> bool:
+        """Whether firing this rule stops the protocol and discards the draft reply."""
+        return self is RuleBand.RED
+
+
 class Tier(str, Enum):
     """Triage urgency, following clinical convention where Tier 1 is worst.
 
@@ -292,6 +326,10 @@ class SymptomCode(str, Enum):
     SORE_THROAT = "sore_throat"
     HOARSENESS = "hoarseness"
     STRIDOR = "stridor"
+    DIFFICULTY_SWALLOWING = "difficulty_swallowing"
+    DROOLING = "drooling"
+    FACIAL_SWELLING = "facial_swelling"
+    TONGUE_SWELLING = "tongue_swelling"
 
     # Cardiovascular
     CHEST_PAIN = "chest_pain"
@@ -305,15 +343,31 @@ class SymptomCode(str, Enum):
     MOTOR_WEAKNESS = "motor_weakness"  # neuraxial hematoma concern
     BACK_PAIN_AT_INJECTION_SITE = "back_pain_at_injection_site"
     CONFUSION = "confusion"
+    SADDLE_NUMBNESS = "saddle_numbness"  # cauda equina / hematoma concern
+    VISUAL_CHANGES = "visual_changes"
+    NECK_STIFFNESS = "neck_stiffness"
+    PERIORAL_NUMBNESS = "perioral_numbness"  # local anesthetic systemic toxicity
+    METALLIC_TASTE = "metallic_taste"  # local anesthetic systemic toxicity
+    TINNITUS = "tinnitus"  # LAST, and a PDPH associated symptom
 
     # Gastrointestinal
     NAUSEA = "nausea"
     VOMITING = "vomiting"
     UNABLE_TO_TOLERATE_FLUIDS = "unable_to_tolerate_fluids"
     CONSTIPATION = "constipation"
+    BOWEL_INCONTINENCE = "bowel_incontinence"  # neuraxial hematoma concern
 
     # Genitourinary
     URINARY_RETENTION = "urinary_retention"
+    DARK_URINE = "dark_urine"  # malignant hyperthermia / rhabdomyolysis concern
+    NO_URINE_OUTPUT = "no_urine_output"
+
+    # Musculoskeletal / limb
+    CALF_PAIN = "calf_pain"
+    CALF_SWELLING = "calf_swelling"
+    LIMB_TIGHTNESS = "limb_tightness"  # compartment syndrome concern
+    PAIN_ON_PASSIVE_STRETCH = "pain_on_passive_stretch"  # compartment syndrome concern
+    MUSCLE_RIGIDITY = "muscle_rigidity"  # malignant hyperthermia concern
 
     # Infection / wound
     FEVER = "fever"
@@ -321,6 +375,20 @@ class SymptomCode(str, Enum):
     WOUND_REDNESS = "wound_redness"
     WOUND_DRAINAGE = "wound_drainage"
     BLEEDING_AT_SITE = "bleeding_at_site"
+    DRESSING_SOAKED = "dressing_soaked"
+    EXPANDING_HEMATOMA = "expanding_hematoma"
+    CATHETER_SITE_DRAINAGE = "catheter_site_drainage"
+
+    # Procedural instrumentation injury
+    # Caused by the airway device or other instrumentation placed during the case.
+    DENTAL_INJURY = "dental_injury"
+    TONGUE_LACERATION = "tongue_laceration"
+
+    # Exposure / positioning injury
+    # Not caused by instrumentation: the eye is injured by incomplete lid closure and
+    # loss of the blink reflex while the patient is anesthetized, which is why a
+    # corneal abrasion turns up after cases involving no airway device at all.
+    EYE_IRRITATION = "eye_irritation"
 
     # Medication effects
     # Pain deliberately has no code here: it is captured on its native 0-10 scale
@@ -331,6 +399,9 @@ class SymptomCode(str, Enum):
     ITCHING = "itching"
     RASH = "rash"
     ALLERGIC_REACTION = "allergic_reaction"
+
+    # Psychiatric
+    SUICIDAL_IDEATION = "suicidal_ideation"
 
 
 _SEVERITY_ORDER: dict[Severity, int] = {
@@ -366,4 +437,10 @@ _TIER_ORDER: dict[Tier, int] = {
     Tier.TIER_3: 0,
     Tier.TIER_2: 1,
     Tier.TIER_1: 2,
+}
+
+_BAND_TIER: dict[RuleBand, Tier] = {
+    RuleBand.RED: Tier.TIER_1,
+    RuleBand.YELLOW: Tier.TIER_2,
+    RuleBand.GREEN: Tier.TIER_3,
 }

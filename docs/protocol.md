@@ -17,13 +17,52 @@ as translator costs a week of calendar time.
 | Field | Meaning |
 | --- | --- |
 | `id` | Stable identifier; referenced by findings, evals and turn analysis |
-| `applicable_when` | `always`, or an expression over case fields; decides whether the topic is in this conversation at all |
+| `applicable_when` | A predicate over case fields; decides whether the topic is in this conversation at all |
 | `goal` | Plain-English intent, passed to the LLM as context for phrasing |
-| `required_slots` | Topic is not satisfied until all are filled |
-| `optional_slots` | Filled if the patient volunteers or a follow-up is cheap |
-| `rules` | Safety rule IDs evaluated while this topic is active (see [safety-rules.md](safety-rules.md)) |
+| `opening_question` | Clinician-authored seed the LLM paraphrases, and the literal fallback when an LLM call fails, so a topic can always be asked |
+| `slots` | What the topic has to learn; each carries its own `required` flag |
+| `question_set` | For survey topics: a named question set that expands into `slots` (see [Satisfaction](#the-satisfaction-question-set)) |
+| `rules` | Safety rule IDs evaluated while this topic is active (see [safety-rules.md](safety-rules.md)). The `global_rules` there fire on every turn regardless, so a topic never needs to repeat them |
 | `max_turns` | Hard cap; exiting on this rather than slot satisfaction is itself a Tier 2 signal |
-| `on_fail` | What to do when the topic cannot be satisfied (e.g. `terminate_politely`) |
+| `on_fail` | `advance` (default) or `terminate_politely` |
+
+### One `slots` list, not two
+
+The topic tables below name required and optional slots separately, and that is how
+this document reads. The artifact uses **one list with a `required` flag per slot**,
+because a slot needs a type, bounds and a phrasing hint anyway: splitting the ids into
+a second list lets a definition drift out of the required set, and there is nothing to
+catch it. Each slot also carries:
+
+- `type` — `bool`, `int`, `float`, `enum` (with `values`) or `text`, plus `min`/`max`
+- `prompt_hint` — what the model is being asked to determine
+- `maps_to` — an optional path into the turn's clinical fields (`pain.score`,
+  `symptom.<code>.presence`, …). One direction only: when the model filled the
+  clinical field but left the slot empty, the engine backfills the slot rather than
+  re-asking a question it already has the answer to. When both are present and
+  disagree, the conflict is recorded and extraction confidence drops, so the topic is
+  not satisfied on a reading nobody can adjudicate.
+
+A slot only counts as filled at or above the protocol's `slot_confidence_threshold`.
+A topic whose extraction keeps falling short exits on `max_turns` instead, which is
+already a triage signal — so low confidence degrades into "a human should look" rather
+than into a confidently wrong answer.
+
+### `applicable_when` is a predicate, not an expression
+
+Three forms, covering every branch the script needs:
+
+```yaml
+applicable_when: {always: true}
+applicable_when: {case_field: block_type, is_null: false}
+applicable_when: {case_field: anesthesia_type, equals: local}
+applicable_when: {case_field: anesthesia_type, in: [spinal, epidural, combined_spinal_epidural]}
+```
+
+There is no expression evaluator to sandbox, and field names and values are checked
+against the real case fields and enums when the file loads. A typo becomes a startup
+error rather than a topic that silently never applies — which is the failure mode that
+matters, because a topic that never runs looks exactly like a healthy patient.
 
 ## Topics — `postop_followup` v1
 
@@ -93,10 +132,17 @@ Confirm the local anesthetic wore off — that is the main thing.
 Answer patient questions about how the anesthesia wore off; defer anything clinical.
 **Required:** `questions_answered_or_deferred`
 
-### 11. `satisfaction` — always, max 2 turns
+### 11. `satisfaction` — always, max 4 turns
 Capture experience feedback. **More important than it first appears** — this is the QA/QC and
-quality-metrics channel, and the question set should be configurable per site.
+quality-metrics channel, and the question set is configurable per site.
 **Required:** `satisfaction_response`, `anesthesia_options_explained`, `anesthesia_risks_explained`
+— supplied by the `site_default` question set, not hand-listed. See
+[the satisfaction question set](#the-satisfaction-question-set).
+
+> **Raised from the drafted 2 turns to 4.** Three required questions cannot be asked in two turns
+> while honouring conversational constraint 7 (*one question at a time*). The alternative — a
+> per-topic batching exemption — buys two turns by weakening a safety constraint everywhere it is
+> quoted, so the turn budget moved instead.
 
 ### 12. `close` — always, max 3 turns
 Deliver safety-netting instructions and confirm the patient can repeat them back.
@@ -121,10 +167,57 @@ Note that `block_type` includes `spinal`, so a spinal patient gets both `neuraxi
 hematoma) and `block_regression` (has sensation come back on schedule?) — which is the intent, not
 an accident of the encoding.
 
+## The satisfaction question set
+
+*Resolves the open item on the configurable shape: a per-site question set block, not fixed slots.*
+
+Satisfaction is the QA/QC and quality-metrics channel, and the questions a site wants to ask are
+not the questions another site wants to ask. Fixed slots would make every such change a protocol
+version bump — and therefore a re-review of the clinical topics, which have not changed. So the
+survey is a **named, versioned block**, referenced by the topic:
+
+```yaml
+question_sets:
+  site_default:
+    version: 1
+    label: Default post-op anesthesia experience survey
+    questions:
+      - {id: satisfaction_response, required: true, response_type: likert_5,
+         text: "Overall, how satisfied were you with the anesthesia care you received?"}
+      - {id: anesthesia_options_explained, required: true, response_type: yes_no, text: "…"}
+      - {id: anesthesia_risks_explained, required: true, response_type: yes_no, text: "…"}
+      - {id: satisfaction_comment, required: false, response_type: free_text, text: "…"}
+
+topics:
+  - id: satisfaction
+    question_set: site_default      # in place of an inline `slots:` list
+```
+
+`response_type` is a closed vocabulary that expands into ordinary slots — `yes_no` → bool,
+`likert_5` → int 1–5, `scale_0_10` → int 0–10, `free_text` → text. **The engine therefore has no
+survey-specific code path**: it walks the satisfaction topic exactly as it walks the pain topic. A
+site swaps the `question_set` reference and the whole survey changes with no code edit.
+
+Three properties hold, and each has a test:
+
+- **Survey answers are never clinical.** No safety rules attach to the topic, and no answer can
+  move the triage tier. A maximally dissatisfied patient with no findings is still Tier 3 —
+  dissatisfaction is a quality signal, not a clinical one, and conflating them would flood the
+  review queue with cases that need no clinician.
+- **A red flag volunteered mid-survey still escalates**, via the always-on `global_rules` in
+  [safety-rules.md](safety-rules.md). This is precisely the case topic-scoped rules would miss,
+  since every clinical topic has already gone by.
+- **Escalation skips the survey.** A RED finding halts the protocol before topic 11, and a missing
+  satisfaction block is not itself a finding.
+
+Slots expanded from a question set are marked `survey: true`, so the summary and triage layers can
+tell survey answers from clinical ones without hardcoding the topic's name.
+
 ## Open items
 
 - Topic 9 (`local_only_recovery`) originally repeated the airway/dental/ocular rules from topic 8.
   Since topic 8 now runs for everyone, topic 9 keeps only `PERSISTENT_LOCAL`. Confirm with the SME
   that nothing else is local-specific.
-- The satisfaction question set needs its configurable shape defined (per-site YAML block vs.
-  fixed slots).
+- The `site_default` question set is a developer's draft of what a quality survey asks. The
+  question *wording* needs the same review the escalation copy does, from whoever owns quality
+  metrics at the site.

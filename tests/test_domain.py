@@ -13,6 +13,7 @@ from app.domain.enums import (
     Presence,
     Route,
     RouteOwner,
+    RuleBand,
     Severity,
     SymptomCode,
     Tier,
@@ -22,6 +23,7 @@ from app.domain.schemas import (
     Finding,
     MedicationReport,
     PainReport,
+    SlotValue,
     Summary,
     SymptomObservation,
     TurnExtraction,
@@ -100,6 +102,10 @@ def make_summary(**overrides: object) -> Summary:
                 "sore_throat",
                 "hoarseness",
                 "stridor",
+                "difficulty_swallowing",
+                "drooling",
+                "facial_swelling",
+                "tongue_swelling",
                 "chest_pain",
                 "palpitations",
                 "syncope",
@@ -109,22 +115,44 @@ def make_summary(**overrides: object) -> Summary:
                 "motor_weakness",
                 "back_pain_at_injection_site",
                 "confusion",
+                "saddle_numbness",
+                "visual_changes",
+                "neck_stiffness",
+                "perioral_numbness",
+                "metallic_taste",
+                "tinnitus",
                 "nausea",
                 "vomiting",
                 "unable_to_tolerate_fluids",
                 "constipation",
+                "bowel_incontinence",
                 "urinary_retention",
+                "dark_urine",
+                "no_urine_output",
+                "calf_pain",
+                "calf_swelling",
+                "limb_tightness",
+                "pain_on_passive_stretch",
+                "muscle_rigidity",
                 "fever",
                 "chills",
                 "wound_redness",
                 "wound_drainage",
                 "bleeding_at_site",
+                "dressing_soaked",
+                "expanding_hematoma",
+                "catheter_site_drainage",
+                "dental_injury",
+                "tongue_laceration",
+                "eye_irritation",
                 "excessive_sedation",
                 "itching",
                 "rash",
                 "allergic_reaction",
+                "suicidal_ideation",
             },
         ),
+        (RuleBand, {"red", "yellow", "green"}),
     ],
 )
 def test_enum_values_are_stable(enum_cls: type, expected: set[str]) -> None:
@@ -356,6 +384,37 @@ def test_unmentioned_symptom_reads_as_unknown_not_absent() -> None:
     observation = extraction.symptom(SymptomCode.CHEST_PAIN)
     assert observation.presence is Presence.UNKNOWN
     assert observation.presence is not Presence.ABSENT
+
+
+def test_unanswered_slot_reads_as_empty_at_zero_confidence() -> None:
+    """A slot nobody asked must not read as a `false` answer to a rule."""
+    empty = make_extraction().slot("tolerating_fluids")
+    assert empty.value is None
+    assert empty.confidence == 0.0
+
+
+def test_slot_lookup_returns_the_recorded_answer() -> None:
+    extraction = make_extraction(
+        slot_values={"tolerating_fluids": SlotValue(value=False, confidence=0.9)}
+    )
+    assert extraction.slot("tolerating_fluids").value is False
+    assert extraction.slot("never_asked").value is None
+
+
+# --- Rule bands -----------------------------------------------------------
+
+
+def test_band_implies_its_tier() -> None:
+    """The loader checks a rule's declared tier against this, so they cannot drift."""
+    assert RuleBand.RED.implied_tier is Tier.TIER_1
+    assert RuleBand.YELLOW.implied_tier is Tier.TIER_2
+    assert RuleBand.GREEN.implied_tier is Tier.TIER_3
+
+
+def test_only_red_halts_the_conversation() -> None:
+    assert RuleBand.RED.halts_conversation
+    assert not RuleBand.YELLOW.halts_conversation
+    assert not RuleBand.GREEN.halts_conversation
 
 
 def test_symptom_lookup_returns_the_reported_observation() -> None:

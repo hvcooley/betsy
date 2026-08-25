@@ -7,8 +7,8 @@ Sized in focused working sessions (~4h), not calendar weeks. ~14 sessions total;
 | --- | --- | --- | --- | --- |
 | 0. Skeleton | Repo, FastAPI, SQLAlchemy models, Alembic, `/health`, Anthropic client wrapper with logging | 1 | `POST /v1/cases` round-trips to DB | In progress — app, Alembic, `/health`, domain schemas and a bare client exist; models and the cases route do not |
 | 1. Single-topic loop | Pain topic hardcoded. One LLM call → extraction + reply. Transcript persists. | 2 | You can have a 6-turn pain conversation in curl | Not started |
-| 2. Protocol engine | YAML loader, state machine, all topics, conditional branching on anesthesia type | 2 | Full script runs end to end for a GA case and a block case | Not started |
-| 3. Safety layer | Rule engine, YAML rule definitions, escalation templates, safety gate, tiering | 2 | PDPH scenario triggers, discards the draft, emits the template, marks Tier 1 | Not started |
+| 2. Protocol engine | YAML loader, state machine, all topics, conditional branching on anesthesia type | 2 | Full script runs end to end for a GA case and a block case | Done — all 12 topics, loader with cross-file validation, engine walking a dynamic topic queue |
+| 3. Safety layer | Rule engine, YAML rule definitions, escalation templates, safety gate, tiering | 2 | PDPH scenario triggers, discards the draft, emits the template, marks Tier 1 | Done in code — rules, templates, gate and tiering all unit-tested. **Not clinically signed off**: every rule and template carries `sme_reviewed: false` |
 | 4. Summary | Summary generator, one-liner, structured block | 1 | Every closed conversation has a readable header | Not started |
 | 5. Eval harness | Patient sim, runner, 30 scenarios, report | 3 | `python -m evals.runner` prints a pass/fail table | Not started |
 | 6. Thin UI | `chat.html` + `review.html`, review endpoint | 2 | You can demo to an anesthesiologist without a terminal | Not started |
@@ -42,3 +42,18 @@ can settle them. As each is answered, move the answer into
    target once recall is locked at 100%.
 7. Should BETSY ever tell a patient to take an already-prescribed medication, or is even that too
    close to prescribing?
+8. **`SYNCOPE` has no band or route in the spec.** It is referenced by the `cardioresp` topic but
+   appears in neither the RED nor the YELLOW list — the RED table only covers *palpitations with
+   syncope*, under `CHEST_PAIN`. Shipped standalone RED / ED_NOW on the recall-over-precision
+   principle. Is post-discharge syncope on its own a 911 call, an ED visit, or a callback?
+9. **`SUICIDAL_IDEATION` routing.** Specified as "human handoff, crisis resources", which names no
+   route, and there is no handoff route in the vocabulary. Routed CALL_911 as the fail-closed
+   choice, with 988 leading the template. Should passive ideation route differently from active
+   intent, and does the MVP need a human-handoff route of its own?
+10. **`PDPH_SUSPECTED` was split in two** to express "ED_NOW or CALL_ANESTHESIA per severity"
+    deterministically: an isolated postural headache goes to anesthesia, and the same headache with
+    visual changes, neck stiffness or fever goes to the ED. Are those the right discriminators?
+11. **Horner's syndrome has no green rule** — it needs `ptosis` and `miosis` symptom codes that the
+    vocabulary lacks. Worth adding, or is describing it enough?
+12. **Satisfaction question wording.** The `site_default` question set is a developer's draft. Who
+    owns quality metrics, and are these the three questions they want asked?
