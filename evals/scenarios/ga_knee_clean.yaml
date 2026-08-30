@@ -1,0 +1,106 @@
+# The uneventful check-in. If this one is not Tier 3, the product has no argument.
+#
+# Deliberately not a silent patient: they report a mild sore throat and day-0
+# grogginess, both of which match GREEN rules. A green match produces approved
+# reassurance and *no finding*, so the tier must be unmoved by them — that is the
+# whole reason the GREEN band exists, and this scenario is what proves it.
+
+scenario_id: ga_knee_clean
+mode: scripted
+description: General anesthetic, no block, nothing wrong. Baseline Tier 3.
+
+case:
+  anesthesia_type: general
+  procedure: Right knee arthroscopy
+  procedure_category: orthopedic
+  hours_post_op: 20
+
+turns:
+  # 1 — identity_consent
+  - say: "Jane Doe, third of March 1970. Yes, happy to go ahead."
+    extract:
+      slot_values:
+        identity_confirmed: {value: true}
+        is_proxy: {value: false}
+        consent_to_continue: {value: true}
+
+  # 2 — open_checkin
+  - say: "Not too bad honestly. Knee's sore but I expected that. It was the right knee, keyhole surgery."
+    extract:
+      slot_values:
+        patient_reported_concerns: {value: "Knee soreness, expected, otherwise fine"}
+        procedure_confirmed: {value: true}
+
+  # 3 — pain
+  - say: "About a 3 now. I took the oxycodone at bedtime and it's helping. It hurts right where they went in."
+    extract:
+      pain:
+        score: 3
+        worst_score: 6
+        trend: better
+        controlled_by_medication: true
+        quote: "About a 3 now"
+      medications:
+        - name: oxycodone
+          adherence: as_prescribed
+          last_dose_hours_ago: 7
+      slot_values:
+        pain_med_taken: {value: true}
+        pain_location_expected: {value: true}
+        med_effectiveness: {value: good}
+
+  # 4 — ponv
+  - say: "No, no sickness at all. I've been drinking tea all morning."
+    extract:
+      symptoms:
+        - {code: nausea, presence: absent}
+        - {code: vomiting, presence: absent}
+      slot_values:
+        tolerating_fluids: {value: true}
+
+  # 5 — cardioresp
+  - say: "No trouble breathing, no chest pain, and I haven't felt faint."
+    extract:
+      symptoms:
+        - {code: shortness_of_breath, presence: absent}
+        - {code: chest_pain, presence: absent}
+        - {code: syncope, presence: absent}
+
+  # 6 — anesthesia_recovery. Two GREEN matches and no finding.
+  - say: "My throat's a bit scratchy and I was a little foggy yesterday, but nothing else."
+    extract:
+      symptoms:
+        - {code: sore_throat, presence: present, severity: mild, quote: "throat's a bit scratchy"}
+        - {code: confusion, presence: present, severity: mild, quote: "a little foggy"}
+
+  # 7 — patient_questions
+  - say: "No, I think you've covered everything."
+    extract:
+      slot_values:
+        questions_answered_or_deferred: {value: true}
+
+  # 8 — satisfaction
+  - say: "Very satisfied. Yes, they explained the options, and yes the risks too. Nothing to improve."
+    extract:
+      slot_values:
+        satisfaction_response: {value: 5}
+        anesthesia_options_explained: {value: true}
+        anesthesia_risks_explained: {value: true}
+        satisfaction_comment: {value: "Nothing to improve"}
+
+  # 9 — close
+  - say: "If my breathing got worse I'd call 911, and I'd ring the surgery for anything else."
+    extract:
+      slot_values:
+        understanding_confirmed: {value: true}
+
+assertions:
+  must_trigger: []
+  must_not_trigger:
+    - AIRWAY_INJURY       # a mild sore throat is the GREEN case, not this one
+    - POSTOP_DELIRIUM     # grogginess under 24h post-op is expected, not delirium
+    - PAIN_SEVERE_UNRESPONSIVE
+  must_reach_tier: 3
+  must_route: [routine]
+  must_reach_status: completed
+  must_be_templated: false

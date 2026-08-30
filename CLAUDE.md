@@ -19,6 +19,11 @@ purpose, then check the governing doc in `docs/` before designing from scratch.
 uv sync                                # install deps
 uv run uvicorn app.main:app --reload   # run dev server (http://127.0.0.1:8000)
 uv run pytest                          # run all tests
+
+uv run python -m app.cli --list             # scenarios and demo cases
+uv run python -m app.cli --all              # replay every scenario, pass/fail table
+uv run python -m app.cli --scenario pdph_spinal   # one check-in, layer by layer
+uv run python -m app.cli --case spinal      # type patient answers yourself
 ```
 
 See README.md for full setup instructions and migration commands.
@@ -31,6 +36,7 @@ list of known spec-vs-code divergences.
 | Working on | Read first |
 | --- | --- |
 | Anything | `docs/architecture.md` (the LLM/deterministic split, turn pipeline), `docs/scope.md` |
+| `app/conversation/` | `docs/architecture.md` — the turn pipeline is specified there step by step |
 | `app/protocol/` | `docs/protocol.md` — topics, slots, branching |
 | `app/safety/` | `docs/safety-rules.md` — RED/YELLOW/GREEN rules, block durations, conversational constraints |
 | `app/triage/`, `app/summary/` | `docs/triage-and-summary.md` |
@@ -66,10 +72,19 @@ safety-critical decisions never depend solely on model output:
   validates it; `engine.py` is the state machine deciding which topic is active and when to
   advance. **`engine.py` names no topic and no slot** — it walks a queue built from the YAML, so
   adding a topic is a YAML edit and nothing else. A test asserts the absence of those literals.
-- `app/llm/` — the LLM boundary. `client.py` wraps the Anthropic SDK; `turn.py` takes one patient
-  message + protocol state and produces a `TurnExtraction` (structured data pulled from the
-  message) plus a draft reply; `prompts/*.md` are versioned prompt templates (`system_v1.md`,
-  `turn_v1.md`, `summary_v1.md`) matched to protocol/rules versions.
+- `app/llm/` — the LLM boundary. `turn.py` defines it: a `TurnEngine` protocol taking one patient
+  message + protocol state and returning a `TurnDraft` (a `TurnExtraction` plus a draft reply).
+  `client.py` wraps the Anthropic SDK; `prompts/*.md` are versioned prompt templates
+  (`system_v1.md`, `turn_v1.md`, `summary_v1.md`) matched to protocol/rules versions. **No real
+  implementation of `TurnEngine` exists yet** — `fake.py` holds two deterministic test doubles
+  (`ScriptedTurnEngine` replays authored extractions, `KeywordTurnEngine` parses free text with a
+  keyword table) so the whole pipeline runs with no API key. They are doubles, never a fallback.
+- `app/conversation/` — the turn pipeline, and the only place the order of the layers lives.
+  `pipeline.py` implements the seven steps in `docs/architecture.md` and owns the safety gate;
+  `session.py` holds one running conversation in memory, shaped like the `conversation` /
+  `message` / `turn_analysis` / `escalation` rows so persistence is later an adapter, not a
+  redesign; `scenario.py` loads and replays the YAML scenarios in `evals/scenarios/`.
+  **`pipeline.py` names no topic and no slot**, same as `engine.py`, and the same test enforces it.
 - `app/safety/` — deterministic, clinician-reviewable red-flag rules, independent of the LLM.
   `rules/postop_v1.yaml` defines rules plus the always-on `global_rules` list; `rules.py` evaluates
   them against extracted data; `templates.py` holds fixed escalation copy (not LLM-generated, for
@@ -85,9 +100,14 @@ safety-critical decisions never depend solely on model output:
   (`session.py`, sqlite by default via `settings.database_url`).
 - `app/main.py` — FastAPI app; mounts `app/static/` for the chat and review HTML demos; routes for
   protocol/turn/safety are not yet wired in (see TODO in the file).
-- `evals/` — offline evaluation harness: `patient_sim.py` (LLM-simulated patient), `runner.py`
-  (runs scenarios from `evals/scenarios/` against the protocol engine), `report.py` (reports
-  results). Not yet implemented.
+- `app/cli.py` — `python -m app.cli`, the way to exercise a whole check-in by hand with no LLM.
+  `--scenario ID` / `--all` replay authored scenarios and print what every layer decided per turn;
+  `--case NAME` opens a REPL on a synthetic case driven by `KeywordTurnEngine`.
+- `evals/` — offline evaluation harness: `scenarios/*.yaml` are check-ins written down (case,
+  turns, and the assertions they must satisfy) and are live — `tests/test_flows.py` runs them and
+  `app/conversation/scenario.py` loads them. `patient_sim.py` (LLM-simulated patient), `runner.py`
+  and `report.py` are not yet implemented; the scenario format carries a `mode:` discriminator so
+  the LLM-driven kind can share the directory and the `case:`/`assertions:` blocks.
 - `docs/` — condensed MVP specification (see the table above).
 
 ### Versioning convention

@@ -11,10 +11,12 @@ from __future__ import annotations
 import copy
 import re
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 import yaml
 
+from app.conversation import pipeline
 from app.domain.enums import AnesthesiaType, BlockType, Presence, SymptomCode
 from app.domain.schemas import PainReport, SlotValue, SymptomObservation, TurnExtraction
 from app.protocol import engine
@@ -530,14 +532,21 @@ def test_a_new_topic_needs_no_code_change(raw: dict) -> None:
     assert state.completed[-1].exit_reason == "satisfied"
 
 
-def test_the_engine_names_no_topic_or_slot(protocol: Protocol) -> None:
+@pytest.mark.parametrize("module", [engine, pipeline], ids=lambda m: Path(m.__file__).name)
+def test_the_control_flow_layers_name_no_topic_or_slot(
+    protocol: Protocol, module: ModuleType
+) -> None:
     """Guards the property above against a well-meaning special case creeping in.
 
+    Both modules that own control flow are checked. The engine decides which topic is
+    active; the pipeline decides what happens to a turn. Neither may know what any of
+    the topics are *about*, or adding a topic stops being a YAML edit.
+
     `hours_since_block` is the one deliberate exception, and it lives in the rules
-    engine rather than here: the block-regression window lookup has to know which
-    slot holds the elapsed time.
+    engine rather than either of these: the block-regression window lookup has to
+    know which slot holds the elapsed time.
     """
-    source = (Path(engine.__file__)).read_text()
+    source = (Path(module.__file__)).read_text()
     code = "\n".join(
         line for line in source.splitlines() if not re.match(r"\s*#", line)
     ).split('"""')
@@ -546,7 +555,9 @@ def test_the_engine_names_no_topic_or_slot(protocol: Protocol) -> None:
     names = {topic.id for topic in protocol.topics}
     names |= {slot.id for topic in protocol.topics for slot in topic.slots}
     leaked = {name for name in names if f'"{name}"' in body or f"'{name}'" in body}
-    assert not leaked, f"engine.py hardcodes protocol content: {sorted(leaked)}"
+    assert not leaked, (
+        f"{Path(module.__file__).name} hardcodes protocol content: {sorted(leaked)}"
+    )
 
 
 # --- Helpers --------------------------------------------------------------

@@ -44,6 +44,24 @@ _None currently._
 
 ## Resolved divergences
 
+**Every GREEN rule was attached to no topic, so the reassurance band could never fire** —
+*resolved: added the five rule references to the topics they belong to.* Rules are evaluated as
+`global_rules` plus the active topic's list, and all five `EXPECTED_*` rules appeared in neither.
+They were reachable only by a caller passing `topic_rules` by hand, which is exactly what the
+safety unit tests do — so the band was fully covered by tests and fully dead in the product. The
+first end-to-end run of a check-in found it in one turn.
+
+Fixed by editing the protocol definition rather than the rules file: the rules were correct, the
+script simply never asked for them. `EXPECTED_MILD_NAUSEA` goes to the PONV topic,
+`EXPECTED_BLOCK_TINGLING` to block regression, and the sore-throat, hoarseness and grogginess rules
+to anesthesia recovery. This is not a clinical change and did not need a version bump: a GREEN rule
+produces no `Finding` by construction, so it cannot escalate, cannot route, and cannot move a tier
+— it can only supply approved wording that was already written and already unreviewed.
+
+`tests/test_flows.py` now asserts that no GREEN rule is orphaned, so the band cannot go dead again.
+The general lesson is the reason the flow tests exist at all: a rule can be individually correct,
+individually tested, and unreachable.
+
 **`SymptomCode` could not express half the RED rules** — *resolved: extended v1 in place.* Writing
 the rule file surfaced that the vocabulary had no way to say perioral numbness, metallic taste or
 tinnitus (`LAST_SYMPTOMS`), calf swelling (`DVT_SUSPECTED`), saddle numbness or bowel incontinence

@@ -1,0 +1,104 @@
+# Nothing clinical is wrong, and the check-in is still not approvable.
+#
+# The tiers are broader than "how sick is the patient" — a record the reviewer cannot
+# rely on is a Tier 2 record even when every symptom is denied. Two independent
+# signals do it here, and either alone would be enough:
+#
+#   - `open_checkin` runs out of turns instead of being satisfied. `max_turns: 2` in
+#     the protocol, two vague answers, and the topic closes with `exit_reason:
+#     max_turns` — which the engine records and tiering reads.
+#   - The patient asks a question that is never answered, so it survives the whole
+#     conversation in `unanswered_questions`.
+#
+# One topic extracts below the confidence threshold, deliberately. Two would be Tier 1
+# on the low-confidence clause, and the point of this scenario is the Tier 2 boundary.
+
+scenario_id: vague_patient
+mode: scripted
+description: No findings, but a topic timed out and a question went unanswered. Tier 2.
+
+case:
+  anesthesia_type: general
+  procedure: Inguinal hernia repair
+  procedure_category: general_surgery
+  hours_post_op: 19
+
+turns:
+  # 1 — identity_consent
+  - say: "It's Tom. Tom Bright. Nineteen sixty-four, uh, April. Yeah alright."
+    extract:
+      slot_values:
+        identity_confirmed: {value: true, confidence: 0.7}
+        is_proxy: {value: false}
+        consent_to_continue: {value: true}
+
+  # 2 — open_checkin, turn 1 of 2. Nothing extractable, and a question is raised.
+  - say: "I dunno really. Same as anyone I suppose. Should I still be this tired?"
+    extract:
+      extraction_confidence: 0.4
+      patient_question: "Should I still be this tired?"
+
+  # 3 — open_checkin, turn 2 of 2. Still nothing, so the topic exits on max_turns.
+  - say: "Hard to say. Bit of everything."
+    extract:
+      extraction_confidence: 0.45
+
+  # 4 — pain
+  - say: "Two or three maybe. Yeah I've taken them. It's where they cut."
+    extract:
+      pain: {score: 3, trend: unchanged, controlled_by_medication: true}
+      slot_values:
+        pain_med_taken: {value: true}
+        pain_location_expected: {value: true}
+
+  # 5 — ponv
+  - say: "No, not sick. Drinking alright."
+    extract:
+      symptoms:
+        - {code: nausea, presence: absent}
+        - {code: vomiting, presence: absent}
+      slot_values:
+        tolerating_fluids: {value: true}
+
+  # 6 — cardioresp
+  - say: "No. None of that."
+    extract:
+      symptoms:
+        - {code: shortness_of_breath, presence: absent}
+        - {code: chest_pain, presence: absent}
+        - {code: syncope, presence: absent}
+
+  # 7 — anesthesia_recovery
+  - say: "Throat's alright. Head's alright."
+    extract:
+      symptoms:
+        - {code: sore_throat, presence: absent}
+        - {code: confusion, presence: absent}
+
+  # 8 — patient_questions. The tiredness question is still hanging.
+  - say: "You never said about the tiredness."
+    extract:
+      slot_values:
+        questions_answered_or_deferred: {value: false}
+
+  # 9 — satisfaction
+  - say: "Neutral. Yes and yes."
+    extract:
+      slot_values:
+        satisfaction_response: {value: 3}
+        anesthesia_options_explained: {value: true}
+        anesthesia_risks_explained: {value: true}
+
+  # 10 — close
+  - say: "Ring 911 for the breathing, surgery for the rest."
+    extract:
+      slot_values:
+        understanding_confirmed: {value: true}
+
+assertions:
+  must_trigger: []
+  must_not_trigger: [PAIN_SEVERE_UNRESPONSIVE, DEHYDRATION_RISK, MED_NONADHERENCE]
+  must_reach_tier: 2
+  must_route: [routine]
+  must_reach_status: completed
+  must_be_templated: false

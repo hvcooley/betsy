@@ -63,6 +63,16 @@ class ProtocolError(ValueError):
     """A protocol definition that cannot be trusted to run. Raised at load time."""
 
 
+def flatten(text: str) -> str:
+    """Collapse the whitespace a folded YAML scalar leaves behind.
+
+    `goal`, `opening_question` and `prompt_hint` are all authored as `>` blocks so the
+    YAML stays readable at 100 columns, which leaves them full of newlines. Anything
+    putting that text in front of a patient wants one line.
+    """
+    return " ".join(text.split())
+
+
 class Applicability(BaseModel):
     """Whether a topic is in this conversation at all.
 

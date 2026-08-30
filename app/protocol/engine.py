@@ -112,10 +112,15 @@ def active_topic(protocol: Protocol, state: ProtocolState) -> Topic | None:
 
 def is_satisfied(topic: Topic, state: ProtocolState, threshold: float) -> bool:
     """Whether every required slot holds a usable answer at sufficient confidence."""
-    return all(_is_filled(slot, state.slot_values.get(slot.id), threshold) for slot in topic.required_slots)
+    return all(is_filled(slot, state.slot_values.get(slot.id), threshold) for slot in topic.required_slots)
 
 
-def _is_filled(slot: Slot, answer: SlotValue | None, threshold: float) -> bool:
+def is_filled(slot: Slot, answer: SlotValue | None, threshold: float) -> bool:
+    """Whether one slot holds a usable answer.
+
+    Public because it is the definition of "answered" for the whole system, and a
+    second copy of it elsewhere could disagree about what the threshold means.
+    """
     if answer is None:
         return False
     return answer.confidence >= threshold and slot.accepts(answer.value)

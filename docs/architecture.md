@@ -76,6 +76,37 @@ halves latency and cost, and safety is unaffected because step 5 can always thro
 Step 3 is non-negotiable — the turn-analysis rows are the audit trail and the substrate the eval
 harness scores against. Persist them even when validation failed.
 
+### Step 2 is an interface, and there is no model behind it yet
+
+The call in step 2 is expressed as a one-method turn-engine interface rather than a function. The
+deterministic layers are therefore runnable, demonstrable and testable end to end with no API key,
+against hand-authored extractions — which is how a scenario can assert that a *tier* is correct
+rather than that a paraphrase was.
+
+That matters beyond convenience. Steps 4 through 7 are the safety-critical half of the pipeline,
+and their properties are properties of the **ordering**: rules must be evaluated against the topic
+that was active when the message arrived, not the one the patient is about to be moved into; a red
+halt must record a reason distinguishable from abandonment; the audit row must be written before
+the rules run. None of that can be tested by testing the rule engine, and none of it depends on a
+model. Building it first means the LLM arrives as an implementation of a contract the rest of the
+system has already been proven against, instead of the thing everything is debugged through.
+
+Two deterministic implementations exist: one replays authored extractions, one parses free text
+with a keyword table so the flow can be driven by hand. Both are test doubles. Neither may ever be
+used as a fallback when a real call fails — a check-in that silently degrades to keyword matching
+is worse than one that stops, because the record would not show which it was.
+
+Two consequences of the ordering are worth stating, since neither is obvious from the diagram:
+
+- **A drafted reply is stale once its topic closes.** The reply is written in step 2, before step 6
+  knows whether the turn satisfied the topic. When it did, the draft asks something already
+  answered, so the pipeline replaces it with the next topic's `opening_question` — which the
+  protocol already designates as the clinician-authored fallback. A model given the next topic as
+  context can phrase the transition better; the ordering does not change.
+- **Green reassurance is scoped like the rules.** It is matched against the topic the turn was
+  judged under, for the same reason, and suppressed entirely once any rule has fired — including on
+  an earlier turn. See conversational constraint 3 in [safety-rules.md](safety-rules.md).
+
 ## Seams for the deferred roadmap
 
 None of this gets built now. These are the places where the MVP is shaped so the next thing is

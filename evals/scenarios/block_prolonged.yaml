@@ -1,0 +1,114 @@
+# A block that has outlasted its window. Proves two things at once:
+#
+# 1. The topic queue branches on the case. `block_regression` is `applicable_when:
+#    {case_field: block_type, is_null: false}`, so this conversation gets a topic the
+#    general-anesthetic scenario never sees, with no code path of its own.
+# 2. YELLOW keeps going. The finding is recorded and the check-in runs to the end —
+#    only RED stops the script — and the tier lands at 2 with the disposition owned by
+#    anesthesia rather than the surgeon.
+#
+# 30 hours against an interscalene window that flags after 24.
+
+scenario_id: block_prolonged
+mode: scripted
+description: Interscalene block still dense at 30h. Yellow finding, conversation completes.
+
+case:
+  anesthesia_type: general
+  block_type: interscalene
+  procedure: Right rotator cuff repair
+  procedure_category: orthopedic
+  hours_post_op: 30
+
+turns:
+  # 1 — identity_consent
+  - say: "Michael Ross, twelfth of June 1958. Go ahead."
+    extract:
+      slot_values:
+        identity_confirmed: {value: true}
+        is_proxy: {value: false}
+        consent_to_continue: {value: true}
+
+  # 2 — open_checkin
+  - say: "Shoulder surgery. The arm's still completely dead, which is worrying me a bit."
+    extract:
+      slot_values:
+        patient_reported_concerns: {value: "Arm still numb the day after shoulder surgery"}
+        procedure_confirmed: {value: true}
+
+  # 3 — pain
+  - say: "The shoulder itself doesn't hurt, maybe a 2. I've taken the tablets they gave me."
+    extract:
+      pain: {score: 2, trend: unchanged, controlled_by_medication: true, quote: "maybe a 2"}
+      medications:
+        - {name: oxycodone, adherence: as_prescribed, last_dose_hours_ago: 5}
+      slot_values:
+        pain_med_taken: {value: true}
+        pain_location_expected: {value: true}
+
+  # 4 — ponv
+  - say: "No sickness, and I'm eating normally."
+    extract:
+      symptoms:
+        - {code: nausea, presence: absent}
+        - {code: vomiting, presence: absent}
+      slot_values:
+        tolerating_fluids: {value: true}
+
+  # 5 — cardioresp
+  - say: "Breathing's fine, no chest pain, no dizziness."
+    extract:
+      symptoms:
+        - {code: shortness_of_breath, presence: absent}
+        - {code: chest_pain, presence: absent}
+        - {code: syncope, presence: absent}
+
+  # 6 — block_regression. The finding.
+  - say: "No, there's no feeling back at all yet, and I can't lift the arm. They did the block yesterday morning."
+    extract:
+      symptoms:
+        - {code: persistent_numbness, presence: present, onset_hours_ago: 30}
+      slot_values:
+        sensation_returning: {value: false}
+        motor_function: {value: weak}
+        hours_since_block: {value: 30}
+        catheter_site_status: {value: no_catheter}
+
+  # 7 — anesthesia_recovery
+  - say: "Throat's fine, and I've felt clear-headed since I got home."
+    extract:
+      symptoms:
+        - {code: sore_throat, presence: absent}
+        - {code: confusion, presence: absent}
+
+  # 8 — patient_questions
+  - say: "No questions, you've explained it."
+    extract:
+      slot_values:
+        questions_answered_or_deferred: {value: true}
+
+  # 9 — satisfaction
+  - say: "Satisfied. Yes to both of those."
+    extract:
+      slot_values:
+        satisfaction_response: {value: 4}
+        anesthesia_options_explained: {value: true}
+        anesthesia_risks_explained: {value: true}
+
+  # 10 — close
+  - say: "Call 911 if my breathing goes off, otherwise ring the surgeon's office."
+    extract:
+      slot_values:
+        understanding_confirmed: {value: true}
+
+assertions:
+  must_trigger: [BLOCK_PROLONGED]
+  must_not_trigger:
+    - BLOCK_NEW_DEFICIT   # sensation has not returned, so this is not a *new* deficit
+    - PHRENIC_DYSPNEA
+    - CATHETER_SITE_INFECTION
+  must_reach_tier: 2
+  must_route: [call_anesthesia]
+  must_reach_status: completed
+  must_be_templated: false
+  max_turns_to_detection: 6

@@ -1,0 +1,52 @@
+# The one topic that is allowed to end the call by failing.
+#
+# `identity_consent` is the only topic in the protocol with `on_fail:
+# terminate_politely`. Every other topic that runs out of turns is recorded as a
+# max_turns exit and the script moves on, because an unanswered question about nausea
+# is a gap in the record. An unanswered question about *who we are speaking to* is not
+# a gap — it means we should not be asking the rest of them at all.
+#
+# So the engine stops without advancing, and the remaining topics are never queued.
+# The conversation is `abandoned` rather than `completed`, and Tier 2 rather than
+# Tier 3: nothing clinical fired, but almost nothing was asked either.
+
+scenario_id: consent_refused
+mode: scripted
+description: Identity never confirmed. The script terminates politely. Abandoned, Tier 2.
+
+case:
+  anesthesia_type: general
+  procedure: Tonsillectomy
+  procedure_category: ent
+  hours_post_op: 18
+
+turns:
+  # 1 of 3 — no identity given.
+  - say: "Who is this? I didn't sign up for a robot calling me."
+    extract:
+      extraction_confidence: 0.8
+      patient_question: "Who is this?"
+
+  # 2 of 3 — refuses again.
+  - say: "I'm not giving my date of birth to a computer."
+    extract:
+      extraction_confidence: 0.8
+
+  # 3 of 3 — the topic runs out of turns and terminates the script.
+  - say: "No. I want to speak to an actual person."
+    extract:
+      extraction_confidence: 0.8
+      patient_requests_human: true
+
+  # Never said. The remaining topics are not asked, and are not recorded as failed
+  # either — not asking them was correct.
+  - say: "Fine, whatever."
+    extract: {}
+
+assertions:
+  must_trigger: []
+  must_not_trigger: [SUICIDAL_IDEATION]
+  must_reach_tier: 2
+  must_route: [routine]
+  must_reach_status: abandoned
+  must_be_templated: false

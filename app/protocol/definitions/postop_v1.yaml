@@ -215,6 +215,7 @@ topics:
     rules:
       - PONV_INTRACTABLE
       - DEHYDRATION_RISK
+      - EXPECTED_MILD_NAUSEA
     slots:
       - id: nausea_present
         required: true
@@ -290,6 +291,7 @@ topics:
       - CATHETER_SITE_INFECTION
       - PHRENIC_DYSPNEA
       - REBOUND_PAIN
+      - EXPECTED_BLOCK_TINGLING
     slots:
       - id: sensation_returning
         required: true
@@ -392,6 +394,9 @@ topics:
       - DENTAL_INJURY
       - POSTOP_DELIRIUM
       - CORNEAL_ABRASION
+      - EXPECTED_SORE_THROAT
+      - EXPECTED_HOARSENESS
+      - EXPECTED_DAY0_GROGGINESS
     slots:
       - id: sore_throat
         required: true

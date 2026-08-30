@@ -1,0 +1,106 @@
+# The scenario that justifies `global_rules` existing at all.
+#
+# The patient denies chest pain when the cardioresp topic asks, and then volunteers it
+# three topics later, in the middle of the satisfaction survey — which declares
+# `rules: []` and is explicitly non-clinical. Under topic-scoped rules alone this
+# would be missed completely, because the topic that owns CHEST_PAIN has long since
+# been closed and the queue never goes backwards.
+#
+# `global_rules` in the safety YAML are evaluated on every turn regardless of topic,
+# so it fires anyway, discards the survey question the agent was about to ask, and
+# ends the call. See the "Topic-scoped rules could not catch a volunteered red flag"
+# divergence in docs/README.md.
+
+scenario_id: volunteered_chest_pain
+mode: scripted
+description: Chest pain raised during the satisfaction survey. A global rule catches it.
+
+case:
+  anesthesia_type: general
+  procedure: Laparoscopic cholecystectomy
+  procedure_category: general_surgery
+  hours_post_op: 22
+
+turns:
+  # 1 — identity_consent
+  - say: "Robert Hale, first of August 1961. Yes, go on."
+    extract:
+      slot_values:
+        identity_confirmed: {value: true}
+        is_proxy: {value: false}
+        consent_to_continue: {value: true}
+
+  # 2 — open_checkin
+  - say: "Gallbladder out. Bit tender but I'm alright."
+    extract:
+      slot_values:
+        patient_reported_concerns: {value: "Abdominal tenderness, otherwise well"}
+        procedure_confirmed: {value: true}
+
+  # 3 — pain
+  - say: "A 3, and I've been taking the co-codamol. It's where the cuts are."
+    extract:
+      pain: {score: 3, trend: better, controlled_by_medication: true, quote: "A 3"}
+      medications:
+        - {name: co-codamol, adherence: as_prescribed, last_dose_hours_ago: 4}
+      slot_values:
+        pain_med_taken: {value: true}
+        pain_location_expected: {value: true}
+
+  # 4 — ponv
+  - say: "No sickness. Drinking plenty."
+    extract:
+      symptoms:
+        - {code: nausea, presence: absent}
+        - {code: vomiting, presence: absent}
+      slot_values:
+        tolerating_fluids: {value: true}
+
+  # 5 — cardioresp. Denied here — which is exactly why the later mention matters.
+  - say: "No, breathing's fine. No chest pain. Haven't felt faint."
+    extract:
+      symptoms:
+        - {code: shortness_of_breath, presence: absent}
+        - {code: chest_pain, presence: absent}
+        - {code: syncope, presence: absent}
+
+  # 6 — anesthesia_recovery
+  - say: "Throat's fine, head's clear."
+    extract:
+      symptoms:
+        - {code: sore_throat, presence: absent}
+        - {code: confusion, presence: absent}
+
+  # 7 — patient_questions
+  - say: "Nothing to ask."
+    extract:
+      slot_values:
+        questions_answered_or_deferred: {value: true}
+
+  # 8 — satisfaction. A topic with no rules of its own. RED fires anyway.
+  - say: "Yeah, satisfied I suppose. Sorry — I've had this tight ache across my chest for about an hour, is that normal?"
+    extract:
+      symptoms:
+        - code: chest_pain
+          presence: present
+          severity: moderate
+          onset_hours_ago: 1
+          quote: "tight ache across my chest for about an hour"
+      patient_question: "is that normal?"
+      slot_values:
+        satisfaction_response: {value: 4}
+
+  # Never said — the script halts above.
+  - say: "Yes they explained the options."
+    extract:
+      slot_values:
+        anesthesia_options_explained: {value: true}
+
+assertions:
+  must_trigger: [CHEST_PAIN]
+  must_not_trigger: [RESP_DISTRESS, SYNCOPE]
+  must_reach_tier: 1
+  must_route: [call_911]
+  must_reach_status: escalated
+  must_be_templated: true
+  max_turns_to_detection: 8

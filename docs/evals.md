@@ -3,6 +3,24 @@
 Build this as a first-class component, not an afterthought — it is what lets a prompt change on a
 Tuesday night happen without wondering what it broke.
 
+## Two kinds of scenario
+
+Scenario files carry a `mode:` discriminator and share their `case:` and `assertions:` blocks, so
+both kinds live in one directory and one runner picks them up.
+
+**`mode: scripted`** replaces the persona with an explicit `turns:` list, each turn giving what the
+patient says *and* the `TurnExtraction` it means. No model is involved on either side. That fixes
+what the extraction was, so a failure can only mean the protocol engine, the rules, the gate, the
+tiering or the summary did something different — never that a paraphrase drifted. These run on
+every commit rather than on demand, and they are what makes an assertion about a tier a statement
+about the deterministic code.
+
+**`mode: simulated`** is the persona-driven kind below, and needs an API key.
+
+The scripted set is the floor, not the goal: it cannot measure extraction accuracy, because it
+supplies the extraction. Recall against the RED set is only meaningful once the simulated patient
+is doing the phrasing.
+
 ## Simulated patient
 
 A second LLM instance driven by a persona card. Scenario files are YAML:

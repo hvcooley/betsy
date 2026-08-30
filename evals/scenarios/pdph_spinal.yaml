@@ -1,0 +1,112 @@
+# The scenario the safety architecture exists for.
+#
+# A postural headache after a spinal fires PDPH_SUSPECTED, which is RED. Everything
+# the gate is supposed to do has to happen on that one turn: the drafted reply is
+# thrown away, the patient is shown fixed clinician-authored copy instead, the
+# protocol halts with the reason `escalated` so triage does not also count it as an
+# abandoned call, and the remaining topics are never asked. The tier is 1, and the
+# disposition is anesthesia's rather than the emergency department's — this headache
+# has none of the features that would make it PDPH_WITH_RED_FLAGS.
+#
+# Note the two turns before it. A spinal is a block, so this case gets the
+# block_regression topic, and at 26h it is well past the 8h spinal window. Sensation
+# has returned and movement is normal, so BLOCK_PROLONGED must not fire — the block
+# question and the headache question are independent, and conflating them would make
+# the escalation unattributable.
+
+scenario_id: pdph_spinal
+mode: scripted
+description: Postural headache after a spinal. RED, templated reply, script halts, Tier 1.
+
+case:
+  anesthesia_type: spinal
+  block_type: spinal
+  procedure: Cesarean section
+  procedure_category: obstetric
+  hours_post_op: 26
+
+turns:
+  # 1 — identity_consent
+  - say: "Amara Okafor, ninth of November 1992. Yes that's fine."
+    extract:
+      slot_values:
+        identity_confirmed: {value: true}
+        is_proxy: {value: false}
+        consent_to_continue: {value: true}
+
+  # 2 — open_checkin
+  - say: "I had a c-section. Honestly the worst thing is my head, it's been awful since this morning."
+    extract:
+      slot_values:
+        patient_reported_concerns: {value: "Severe headache since the morning after a c-section"}
+        procedure_confirmed: {value: true}
+
+  # 3 — pain
+  - say: "The incision is maybe a 4. I've been taking the paracetamol, it takes the edge off."
+    extract:
+      pain: {score: 4, trend: better, controlled_by_medication: true, quote: "maybe a 4"}
+      medications:
+        - {name: paracetamol, adherence: as_prescribed, last_dose_hours_ago: 3}
+      slot_values:
+        pain_med_taken: {value: true}
+        pain_location_expected: {value: true}
+
+  # 4 — ponv
+  - say: "A bit queasy but I've kept everything down."
+    extract:
+      symptoms:
+        - {code: nausea, presence: present, severity: mild, quote: "a bit queasy"}
+        - {code: vomiting, presence: absent}
+      slot_values:
+        tolerating_fluids: {value: true}
+
+  # 5 — cardioresp
+  - say: "Breathing's fine and no chest pain. No fainting."
+    extract:
+      symptoms:
+        - {code: shortness_of_breath, presence: absent}
+        - {code: chest_pain, presence: absent}
+        - {code: syncope, presence: absent}
+
+  # 6 — block_regression. Past the window, but fully resolved: no finding.
+  - say: "The spinal wore off yesterday evening, legs are completely normal now."
+    extract:
+      symptoms:
+        - {code: persistent_numbness, presence: absent}
+        - {code: motor_weakness, presence: absent}
+      slot_values:
+        sensation_returning: {value: true}
+        motor_function: {value: normal}
+        hours_since_block: {value: 26}
+
+  # 7 — neuraxial_screen. RED fires here; nothing after this is ever asked.
+  - say: "Yes, a terrible headache. It's fine when I'm lying flat but the second I sit up to feed her it's unbearable."
+    extract:
+      symptoms:
+        - code: postural_headache
+          presence: present
+          severity: severe
+          onset_hours_ago: 8
+          quote: "fine when I'm lying flat but the second I sit up it's unbearable"
+      slot_values:
+        headache_present: {value: true}
+        headache_positional: {value: true}
+
+  # Never said — the script halts on the turn above. Kept so the scenario states what
+  # it is refusing to ask, rather than merely stopping.
+  - say: "No, my vision's fine."
+    extract:
+      symptoms:
+        - {code: visual_changes, presence: absent}
+
+assertions:
+  must_trigger: [PDPH_SUSPECTED]
+  must_not_trigger:
+    - PDPH_WITH_RED_FLAGS   # no visual change, neck stiffness or fever
+    - BLOCK_PROLONGED       # past the window, but the block has fully resolved
+    - NEURAXIAL_HEMATOMA
+  must_reach_tier: 1
+  must_route: [call_anesthesia]
+  must_reach_status: escalated
+  must_be_templated: true
+  max_turns_to_detection: 7
