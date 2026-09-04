@@ -24,6 +24,7 @@ uv run python -m app.cli --list             # scenarios and demo cases
 uv run python -m app.cli --all              # replay every scenario, pass/fail table
 uv run python -m app.cli --scenario pdph_spinal   # one check-in, layer by layer
 uv run python -m app.cli --case spinal      # type patient answers yourself
+uv run python -m app.cli --case spinal --live   # ...against the real model (needs a key)
 ```
 
 See README.md for full setup instructions and migration commands.
@@ -73,12 +74,20 @@ safety-critical decisions never depend solely on model output:
   advance. **`engine.py` names no topic and no slot** — it walks a queue built from the YAML, so
   adding a topic is a YAML edit and nothing else. A test asserts the absence of those literals.
 - `app/llm/` — the LLM boundary. `turn.py` defines it: a `TurnEngine` protocol taking one patient
-  message + protocol state and returning a `TurnDraft` (a `TurnExtraction` plus a draft reply).
-  `client.py` wraps the Anthropic SDK; `prompts/*.md` are versioned prompt templates
-  (`system_v1.md`, `turn_v1.md`, `summary_v1.md`) matched to protocol/rules versions. **No real
-  implementation of `TurnEngine` exists yet** — `fake.py` holds two deterministic test doubles
+  message + protocol state and returning a `TurnDraft` (a `TurnExtraction` plus *two* proposed
+  replies — the ordinary next question, and a transition used only if the turn closed the topic).
+  `anthropic_engine.py` is the real implementation: one non-streaming structured-output call per
+  turn, the ≤2-retry validation ladder, and a recorded hard failure rather than an exception when
+  it is exhausted. `wire.py` is the response schema the model may return — deliberately not
+  `TurnExtraction`, since provenance is stamped by the caller — plus the adapter back, which puts
+  every slot answer through `Slot.accepts()`. `context.py` renders the prompts and generates the
+  closed vocabularies from `app/domain/enums.py` so they cannot drift. `client.py` constructs the
+  SDK client; `prompts/*.md` are versioned templates (`system_v1.md`, `turn_v1.md`,
+  `summary_v1.md`) matched to protocol/rules versions — `system_v1.md` is the cached prefix and
+  **nothing per-conversation may be added to it**. `fake.py` holds two deterministic test doubles
   (`ScriptedTurnEngine` replays authored extractions, `KeywordTurnEngine` parses free text with a
-  keyword table) so the whole pipeline runs with no API key. They are doubles, never a fallback.
+  keyword table) so the whole pipeline runs with no API key. They are doubles, never a fallback,
+  and a test asserts `anthropic_engine.py` cannot reach for them.
 - `app/conversation/` — the turn pipeline, and the only place the order of the layers lives.
   `pipeline.py` implements the seven steps in `docs/architecture.md` and owns the safety gate;
   `session.py` holds one running conversation in memory, shaped like the `conversation` /
@@ -100,9 +109,11 @@ safety-critical decisions never depend solely on model output:
   (`session.py`, sqlite by default via `settings.database_url`).
 - `app/main.py` — FastAPI app; mounts `app/static/` for the chat and review HTML demos; routes for
   protocol/turn/safety are not yet wired in (see TODO in the file).
-- `app/cli.py` — `python -m app.cli`, the way to exercise a whole check-in by hand with no LLM.
+- `app/cli.py` — `python -m app.cli`, the way to exercise a whole check-in by hand.
   `--scenario ID` / `--all` replay authored scenarios and print what every layer decided per turn;
-  `--case NAME` opens a REPL on a synthetic case driven by `KeywordTurnEngine`.
+  `--case NAME` opens a REPL on a synthetic case driven by `KeywordTurnEngine`, and
+  `--case NAME --live` drives the same REPL against the real engine (needs a key, costs money).
+  Every turn prints which layer authored the reply the patient saw.
 - `evals/` — offline evaluation harness: `scenarios/*.yaml` are check-ins written down (case,
   turns, and the assertions they must satisfy) and are live — `tests/test_flows.py` runs them and
   `app/conversation/scenario.py` loads them. `patient_sim.py` (LLM-simulated patient), `runner.py`
@@ -120,4 +131,7 @@ clinician review/sign-off is tied to specific versions.
 ## Config
 
 Settings (`app/config.py`) load from `.env` via `pydantic-settings`: `env`, `anthropic_api_key`,
-`database_url` (defaults to `sqlite:///./betsy.db`).
+`database_url` (defaults to `sqlite:///./betsy.db`), and the turn-engine knobs — `turn_model`
+(starts `claude-sonnet-5`; the eval harness is what should decide whether to upgrade),
+`turn_effort`, `turn_max_tokens`, `turn_max_validation_retries` (2, per the retry ladder in
+`docs/architecture.md`) and `turn_timeout_seconds`.

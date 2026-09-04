@@ -148,6 +148,41 @@ quality-metrics channel, and the question set is configurable per site.
 Deliver safety-netting instructions and confirm the patient can repeat them back.
 **Required:** `understanding_confirmed`
 
+## One topic closes per turn
+
+A turn advances the queue by at most one step, and a topic's slots are only filled by messages
+sent while that topic was active. A patient who answers ahead — "my pain's a 4 and no, I haven't
+been sick at all" while the pain topic is open — closes the pain topic and nothing else; the PONV
+answer is discarded for the purposes of protocol progress, and PONV is asked normally on a later
+turn.
+
+The alternative was letting one message satisfy several topics, which is what the state machine
+originally allowed. It was rejected: a topic closed by a message that was never asked for it is
+recorded as satisfied with no question behind it, and neither the transcript nor the turn analysis
+shows which message was taken as its answer. For a record whose whole purpose is to be re-read by
+a clinician, a question asked twice is much cheaper than an answer with no question.
+
+**This discards protocol progress only, never clinical content.** The pain, symptom, medication and
+temperature fields extracted from a message are evaluated by the safety rules on the turn they
+arrive, whatever topic is active — a volunteered chest pain escalates immediately, which is the
+whole point of the always-on `global_rules` list. Only the answer's effect on *which question comes
+next* is dropped.
+
+### Deferred: carry volunteered answers forward as something to raise
+
+The visible cost is that a patient who volunteered an answer is asked the question again anyway,
+as if they had said nothing. The intended fix is not to re-enable multi-topic advance, but to
+**remember what was volunteered and raise it when its topic opens** — the model would be given
+the earlier statement and its quote as context for that topic, and would open with an
+acknowledgement and a request to confirm or expand ("you mentioned earlier that you'd been a bit
+queasy — has that settled?") rather than a cold opening question.
+
+That keeps the properties this rule exists to protect: the question is still asked, the topic is
+still satisfied by a message sent while it was active, and the transcript still shows both. It is
+a real feature rather than a tweak — it needs volunteered observations retained on the protocol
+state and keyed by the topic they belong to, surfaced into the turn prompt, and enough eval
+coverage to show that a re-raised answer is not being led. Not in the MVP.
+
 ## Branching and case fields
 
 `applicable_when` reads two independent case fields:

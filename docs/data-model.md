@@ -25,6 +25,8 @@ turn_analysis    id, message_id, extraction_json, model, prompt_version,
                  latency_ms, input_tokens, output_tokens,
                  raw_response, validation_retries
                  -- audit + eval substrate. Never skip this table.
+                 -- raw_response is currently lossy when validation failed:
+                 --   see "raw_response is lossy" in README.md.
 
 finding          id, conversation_id, source_message_id, code, value_json,
                  severity (green|yellow|red), confidence, created_at

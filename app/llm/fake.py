@@ -88,6 +88,14 @@ class ScriptedTurn:
     extract: dict[str, Any] = field(default_factory=dict)
     hard_failure: bool = False
     reply: str | None = None
+    transition_reply: str = ""
+    """What to say if this turn closed the topic. Empty by default, on purpose.
+
+    A scenario asserts what the deterministic layers did, not how a sentence was
+    phrased, so leaving this empty keeps the transition on the protocol's own
+    `opening_question` and keeps the authored scenarios independent of any engine's
+    prose. Set it only in a test that is specifically exercising the transition.
+    """
 
 
 DEFAULT_SCRIPTED_CONFIDENCE = 0.9
@@ -127,7 +135,12 @@ class ScriptedTurnEngine:
             request.topic,
             request.state.slot_values | extraction.slot_values,
         )
-        return TurnDraft(extraction=extraction, draft_reply=reply, model="scripted")
+        return TurnDraft(
+            extraction=extraction,
+            draft_reply=reply,
+            transition_reply=turn.transition_reply,
+            model="scripted",
+        )
 
 
 def _with_defaults(payload: dict[str, Any]) -> dict[str, Any]:

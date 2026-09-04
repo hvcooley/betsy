@@ -33,6 +33,8 @@ from app.domain.enums import (
     Tier,
 )
 from app.llm.fake import ScriptedTurn, ScriptedTurnEngine
+from app.llm.turn import TurnDraft, TurnRequest
+from app.protocol import engine
 from app.protocol.engine import CaseFacts
 from app.protocol.loader import Protocol, load_default_protocol
 from app.safety import templates
@@ -455,6 +457,125 @@ def test_finishing_a_topic_opens_the_next_one_rather_than_re_asking(
     assert turn.reply.content == " ".join(
         protocol.topic(turn.next_topic_id or "").opening_question.split()
     )
+
+
+def test_a_transition_written_for_the_topic_that_opened_is_used(protocol: Protocol) -> None:
+    """Decision 5: the engine phrases the handoff, having been told what is next.
+
+    The same closing turn as the test above, except the engine offered a transition.
+    It was written against `TurnRequest.next_topic`, the prediction taken before the
+    cursor moved, and the topic that actually opened is the one predicted — so it is
+    used in place of the canned opening line.
+    """
+    smooth = "Glad the tablets are helping. Have you felt sick to your stomach at all?"
+    pain = ScriptedTurn(
+        say="A 2, taken my tablets, right where they operated",
+        extract={
+            "pain": {"score": 2},
+            "slot_values": {
+                "pain_med_taken": {"value": True},
+                "pain_location_expected": {"value": True},
+            },
+        },
+        reply="And how many doses have you had today?",
+        transition_reply=smooth,
+    )
+    _, _, outcomes = run([*PREAMBLE, pain], protocol)
+    turn = outcomes[-1]
+
+    assert turn.topic_changed
+    assert turn.reply.content == smooth
+
+
+def test_a_transition_is_discarded_when_a_different_topic_opened(
+    protocol: Protocol,
+) -> None:
+    """The prediction is verified, not trusted.
+
+    Tested against `_transition` directly rather than through a conversation, because
+    no conversation can currently produce the mismatch: `engine._advance` closes at
+    most one topic per turn, so the topic that opens is always the one the queue
+    predicted. That is a deliberate property of the engine rather than of this
+    module, and the deferred volunteered-information feature is exactly the kind of
+    change that would revisit it.
+
+    So this asserts the guard itself. Losing it would turn a future engine change
+    into a patient being welcomed into a topic that is then skipped — a bug visible
+    only in a transcript nobody is reading yet.
+    """
+    pipeline = Pipeline(
+        protocol=protocol,
+        rules=RuleEngine.load(protocol.rules_version),
+        turn_engine=ScriptedTurnEngine([]),
+    )
+    predicted, actual = protocol.topics[1], protocol.topics[2]
+    draft = TurnDraft(draft_reply="...", transition_reply="On to the next thing —")
+    request = TurnRequest(
+        protocol=protocol,
+        case=GA_CASE,
+        state=engine.start(protocol, GA_CASE),
+        topic=protocol.topics[0],
+        history=(),
+        patient_message="...",
+        turn_index=0,
+        next_topic=predicted,
+    )
+
+    matched = pipeline._transition(draft, request, predicted)
+    mismatched = pipeline._transition(draft, request, actual)
+    unoffered = pipeline._transition(TurnDraft(draft_reply="..."), request, predicted)
+
+    assert matched == (draft.transition_reply, "transition")
+    assert mismatched == (" ".join(actual.opening_question.split()), "protocol")
+    assert unoffered == (" ".join(predicted.opening_question.split()), "protocol")
+
+
+def test_a_red_finding_discards_the_transition_too(protocol: Protocol) -> None:
+    """Decision 2 is unchanged by there being two drafts rather than one.
+
+    The gate runs before either draft is chosen, so a second draft is not a second
+    way for generated prose to reach a patient during an escalation.
+    """
+    smooth = "Thanks for telling me. Now, about your breathing —"
+    chest_pain = ScriptedTurn(
+        say="My chest is really tight and it's hard to breathe",
+        extract={
+            "symptoms": [
+                {
+                    "code": SymptomCode.CHEST_PAIN,
+                    "presence": Presence.PRESENT,
+                    "severity": Severity.SEVERE,
+                }
+            ]
+        },
+        reply="Tell me more about that.",
+        transition_reply=smooth,
+    )
+    _, conversation, outcomes = run([*PREAMBLE, chest_pain], protocol)
+    turn = outcomes[-1]
+
+    assert turn.escalated
+    assert turn.reply.content != smooth
+    assert turn.reply.is_templated
+    assert conversation.status is ConversationStatus.ESCALATED
+
+
+def test_a_hard_failure_that_closes_a_topic_still_falls_back_to_the_protocol(
+    protocol: Protocol,
+) -> None:
+    """An engine that could not produce an extraction phrases nothing either.
+
+    The fallback chain has to hold at its weakest link: on the turn where the model
+    is least trustworthy, the patient still gets clinician-authored words.
+    """
+    _, _, outcomes = run(
+        [*PREAMBLE, ScriptedTurn(say="mmhm", hard_failure=True)], protocol
+    )
+    turn = outcomes[-1]
+
+    assert turn.hard_failure
+    assert not turn.reply.is_templated
+    assert turn.reply.content.strip()
 
 
 def test_the_reply_is_kept_while_the_topic_is_still_open(protocol: Protocol) -> None:

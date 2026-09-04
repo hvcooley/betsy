@@ -24,6 +24,15 @@ and each is asserted directly in `tests/test_pipeline.py`:
    Invariant 4. A response that never validated is still a row; skipping it would
    leave a hole in the audit trail exactly where the record is least trustworthy.
 
+5. **A drafted reply is stale once its topic closes, so the engine drafts twice.**
+   Step 2 writes the reply before step 6 knows whether the turn satisfied the topic.
+   The engine is given the *predicted* next topic and returns a transition alongside
+   the ordinary draft; this module picks between them after the cursor has moved, and
+   only when the topic that actually became active is the one the transition was
+   written for. The model phrases both branches, the protocol engine decides which
+   one happened — the ordering is unchanged, and so is the fallback to the next
+   topic's clinician-authored `opening_question`.
+
 Nothing in this module names a topic or a slot, for the same reason
 `app/protocol/engine.py` does not: the script is data. `tests/test_protocol.py`
 enforces that for both files.
@@ -32,6 +41,7 @@ enforces that for both files.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from typing import Literal
 
 from app.conversation.session import (
     Conversation,
@@ -53,6 +63,10 @@ from app.summary.generator import build_summary, tier_for
 # modules cannot drift apart on a typo — a mismatch here would silently re-classify
 # every escalation as an abandoned conversation.
 ESCALATED = "escalated"
+
+# Where a patient-facing reply came from. Recorded per turn so a transcript can be
+# read back without guessing which words were generated and which were authored.
+ReplySource = Literal["draft", "transition", "protocol", "template", "closing"]
 
 # Placeholder sign-off lines, on the same footing as everything in
 # `app/safety/templates.py`: scaffolding that says the right kind of thing, written by
@@ -90,6 +104,16 @@ class TurnOutcome:
     slots_filled: tuple[str, ...] = ()
     topic_changed: bool = False
     hard_failure: bool = False
+    reply_source: ReplySource = "draft"
+    """Where the words the patient saw came from.
+
+    The same reason the findings and the tier are rendered per turn rather than only
+    at the end: which of the two drafts was used, and whether either was, is a
+    decision the pipeline made, and a decision with no visible derivation is what
+    this system exists not to produce. `template` is the escalation path — fixed
+    clinician copy — and `protocol` means an authored line from the YAML rather than
+    anything generated.
+    """
 
     # --- Snapshot ----------------------------------------------------------
     cursor: int = 0
@@ -153,6 +177,8 @@ class Pipeline:
             raise ConversationClosed(f"conversation {conversation.id} has no active topic")
 
         # 1. Build context, and record what the patient said before anything can fail.
+        #    `next_topic` is a lookahead the engine uses to phrase a transition; it is
+        #    read here, before the cursor moves, and checked again in step 7.
         patient_message = conversation.add_message("patient", text)
         request = TurnRequest(
             protocol=self.protocol,
@@ -162,6 +188,7 @@ class Pipeline:
             history=conversation.history,
             patient_message=text,
             turn_index=conversation.turn_count,
+            next_topic=engine.upcoming_topic(self.protocol, conversation.state),
         )
 
         # 2. One call to the model layer.
@@ -191,7 +218,7 @@ class Pipeline:
             return self._escalate(conversation, topic, extraction, findings, filled)
 
         # 7. Compose and persist the reply.
-        return self._continue(conversation, topic, extraction, findings, band, draft, filled)
+        return self._continue(conversation, request, extraction, findings, band, draft, filled)
 
     def close(self, conversation: Conversation) -> Summary:
         """Finish the conversation and produce the clinician-facing record."""
@@ -249,13 +276,14 @@ class Pipeline:
                 band="red",
                 reply=reply,
                 slots_filled=filled,
+                reply_source="template",
             ),
         )
 
     def _continue(
         self,
         conversation: Conversation,
-        topic: Topic,
+        request: TurnRequest,
         extraction: TurnExtraction,
         findings: list[Finding],
         band: SafetyBand,
@@ -263,11 +291,13 @@ class Pipeline:
         filled: tuple[str, ...],
     ) -> TurnOutcome:
         """Keep the drafted reply, unless the conversation has moved past it."""
+        topic = request.topic
         next_topic = engine.active_topic(self.protocol, conversation.state)
         moved = next_topic is None or next_topic.id != topic.id
 
         reassurance = self._reassurance(conversation, topic, extraction, findings, band)
 
+        source: ReplySource
         if conversation.state.finished:
             # `halted_reason` is set only when something stopped the script early; a
             # script that simply ran out of topics leaves it None.
@@ -276,15 +306,17 @@ class Pipeline:
                 if conversation.state.halted_reason is None
                 else TERMINATED_MESSAGE
             )
+            source = "closing"
         elif moved and next_topic is not None:
             # The draft was written for a topic that is now finished, so it would ask
-            # a question the patient has already answered. The protocol's own opening
-            # line for the new topic is the clinician-authored fallback for exactly
-            # this. A real turn engine phrases the transition; the ordering does not
-            # change.
-            text = flatten(next_topic.opening_question)
+            # a question the patient has already answered. The engine was given the
+            # *predicted* next topic and may have pre-written a transition for it, in
+            # which case that is the better line; the protocol's own opening question
+            # for the new topic remains the clinician-authored fallback.
+            text, source = self._transition(draft, request, next_topic)
         else:
             text = draft.draft_reply or flatten(topic.opening_question)
+            source = "draft" if draft.draft_reply else "protocol"
 
         if reassurance:
             text = " ".join([*reassurance, text])
@@ -303,8 +335,34 @@ class Pipeline:
                 slots_filled=filled,
                 topic_changed=moved,
                 hard_failure=draft.hard_failure,
+                reply_source=source,
             ),
         )
+
+    def _transition(
+        self, draft: TurnDraft, request: TurnRequest, next_topic: Topic
+    ) -> tuple[str, ReplySource]:
+        """The line that opens `next_topic`, preferring the engine's own phrasing.
+
+        The engine wrote its transition in step 2 against `request.next_topic`, a
+        lookahead taken before the cursor moved. `engine._advance` closes at most one
+        topic per turn, so today that lookahead is right whenever a topic closes.
+
+        It is still *verified* rather than trusted: the draft is used only when the
+        topic that actually became active is the one it was written for. The check is
+        cheap, and what it guards is not hypothetical — the one-topic-per-turn rule is
+        a property of the engine that a future change could relax (the deferred
+        volunteered-information feature is exactly the kind of change that would look
+        at it). If that happens, the failure here is a canned opening line instead of
+        a smooth one, rather than a patient being welcomed into a topic that is being
+        skipped. Anything unverified falls back to the protocol's own
+        `opening_question`; the model proposes both branches, and the protocol engine
+        still decides which one happened.
+        """
+        predicted = request.next_topic
+        if draft.transition_reply and predicted is not None and predicted.id == next_topic.id:
+            return draft.transition_reply, "transition"
+        return flatten(next_topic.opening_question), "protocol"
 
     def _reassurance(
         self,

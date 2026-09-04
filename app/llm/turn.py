@@ -47,6 +47,20 @@ class TurnRequest:
     history: tuple[Message, ...]
     patient_message: str
     turn_index: int
+    next_topic: Topic | None = None
+    """The topic that would follow if this turn closes the active one.
+
+    A *prediction*, and the engine is told as much. It is read off the protocol
+    queue, so it is right whenever the current topic closes normally and wrong when
+    one turn closes two topics at once — a patient who volunteers several answers can
+    do that. Supplying it is what lets the engine pre-write a transition; deciding
+    whether the transition is used stays with `app/conversation/pipeline.py`, which
+    compares this against the topic that actually became active. The model is never
+    told which of its two drafts was chosen, and never decides.
+
+    `None` means the protocol queue holds nothing after the active topic, so closing
+    it ends the conversation.
+    """
 
     @property
     def provenance(self) -> dict[str, object]:
@@ -82,6 +96,17 @@ class TurnDraft(BaseModel):
         description=(
             "Proposed patient-facing text. A RED finding discards this, so nothing "
             "here may be shown to a patient before the safety gate has run."
+        ),
+    )
+    transition_reply: str = Field(
+        default="",
+        description=(
+            "The same turn phrased for the case where it *closed* the topic: a brief "
+            "acknowledgement plus the next topic's opening question. Written at the "
+            "same time as `draft_reply` because step 2 cannot know which one applies "
+            "— step 6 decides that, and the pipeline then picks. Empty means the "
+            "engine offered no transition, and the next topic's clinician-authored "
+            "`opening_question` is used instead."
         ),
     )
     hard_failure: bool = Field(

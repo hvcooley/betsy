@@ -40,7 +40,30 @@ below.
 Points where the shipped skeleton and the spec do not yet agree. Each needs a decision, not just
 a rename. Referred to by name elsewhere in these docs, so the names are stable.
 
-_None currently._
+**`raw_response` is lossy on exactly the turns it matters most** — *needs a decision; no change
+made.* Invariant 4 says turn analysis is persisted on every turn including the failures, because
+that row is the audit trail and the eval substrate. On the failure path it is currently *thinner*
+than that intends. The turn engine sends its request through the SDK's `messages.parse`, which
+validates the response inside the SDK and raises, so the model's literal JSON never comes back to
+us. What is stored in `raw_response` on a schema failure is Pydantic's report — the failing field
+path and the value it rejected — rather than the payload that produced it.
+
+That is enough to answer "what was wrong with it", and enough for a reviewer to see why the turn
+hard-failed. It is *not* enough to re-score the turn later against a changed schema, or to tell
+whether the model produced something reasonable that a schema bug rejected — which is precisely
+the question a hard failure raises. So the audit row is weakest at the one point where the record
+is least trustworthy, which is the same reasoning that makes a hard failure Tier 1 in the first
+place.
+
+The clean fix is to send the call as `messages.create` with an explicit `output_config` format and
+validate in our own code, holding the raw text either way. That needs the SDK's JSON-schema
+transform to be public API; it is a private module path today, and depending on a private path
+from the module that owns the audit trail was judged the worse of the two trades. Either of two
+things settles it: the transform becoming public, or measuring how often schema failures actually
+occur once the engine runs against a real key — if the answer is "effectively never", the gap
+costs nothing and the current choice stands on its own. Commented at the point it matters in the
+turn engine; the affected column is `turn_analysis.raw_response` in
+[data-model.md](data-model.md).
 
 ## Resolved divergences
 

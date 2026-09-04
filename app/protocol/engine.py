@@ -110,6 +110,27 @@ def active_topic(protocol: Protocol, state: ProtocolState) -> Topic | None:
     return None if topic_id is None else protocol.topic(topic_id)
 
 
+def upcoming_topic(protocol: Protocol, state: ProtocolState) -> Topic | None:
+    """The next topic in the queue, or None if the active one is the last.
+
+    A lookahead, not a decision: it says what *would* come next if the active topic
+    closed right now. Because `_advance` closes at most one topic per turn, this is
+    right whenever a topic closes at all — but it is still a prediction of *whether*,
+    not a statement, and a caller acting on it should check what actually became
+    active rather than assume the topic closed.
+
+    Exists so the turn engine can be given the next topic as context and phrase a
+    transition, instead of the pipeline dropping in a canned opening line. Names no
+    topic and no slot, like everything else here.
+    """
+    if state.finished:
+        return None
+    following = state.cursor + 1
+    if following >= len(state.topic_queue):
+        return None
+    return protocol.topic(state.topic_queue[following])
+
+
 def is_satisfied(topic: Topic, state: ProtocolState, threshold: float) -> bool:
     """Whether every required slot holds a usable answer at sufficient confidence."""
     return all(is_filled(slot, state.slot_values.get(slot.id), threshold) for slot in topic.required_slots)
@@ -270,30 +291,45 @@ def _record_conversation_signals(
 
 
 def _advance(protocol: Protocol, state: ProtocolState) -> None:
-    """Pop topics off the queue for as long as they are done with.
+    """Close at most one topic. **One turn never advances the queue twice.**
 
-    A loop rather than a single step because one turn can finish more than one topic:
-    a patient who volunteers everything can satisfy the current topic and the next.
+    Deliberately a single step rather than a loop. Closing two topics on one turn
+    would mean the second was answered by a message that was never asked for it — the
+    patient volunteered something and the script silently counted it as that topic's
+    answer, skipping the question a clinician wrote. The record would then show a
+    topic satisfied with no question behind it, and neither the transcript nor the
+    turn analysis would say which message was taken as the answer.
+
+    So a topic is only ever satisfied by turns spent inside it, and a patient who
+    answers ahead is asked the question anyway. That is also what makes the pipeline's
+    next-topic lookahead sound: exactly one topic closes, so the topic that opens is
+    always the one the queue predicted.
+
+    Information the patient volunteers early is not lost — the clinical fields it
+    produced are evaluated by the safety rules on the turn it arrived, which is what
+    makes a volunteered chest pain escalate immediately. What is discarded is only
+    its effect on *protocol progress*. Carrying it forward as something to raise when
+    that topic opens is a deferred feature; see docs/protocol.md.
     """
-    while state.cursor < len(state.topic_queue):
-        topic = protocol.topic(state.topic_queue[state.cursor])
-
-        if is_satisfied(topic, state, protocol.slot_confidence_threshold):
-            _close_topic(state, topic, "satisfied")
-            continue
-
-        if state.turns_in_topic >= topic.max_turns:
-            if topic.on_fail == "terminate_politely":
-                _close_topic(state, topic, "terminated", advance=False)
-                state.finished = True
-                state.halted_reason = f"{topic.id}_failed"
-                return
-            _close_topic(state, topic, "max_turns")
-            continue
-
+    topic = active_topic(protocol, state)
+    if topic is None:
+        state.finished = True
         return
 
-    state.finished = True
+    if is_satisfied(topic, state, protocol.slot_confidence_threshold):
+        _close_topic(state, topic, "satisfied")
+    elif state.turns_in_topic >= topic.max_turns:
+        if topic.on_fail == "terminate_politely":
+            _close_topic(state, topic, "terminated", advance=False)
+            state.finished = True
+            state.halted_reason = f"{topic.id}_failed"
+            return
+        _close_topic(state, topic, "max_turns")
+    else:
+        return
+
+    if state.cursor >= len(state.topic_queue):
+        state.finished = True
 
 
 def _close_topic(

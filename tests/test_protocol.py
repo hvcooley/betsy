@@ -315,6 +315,47 @@ def test_filling_required_slots_advances(protocol: Protocol) -> None:
     assert state.turns_in_topic == 0
 
 
+def test_one_turn_never_closes_two_topics(protocol: Protocol) -> None:
+    """The queue advances at most one step per turn, whatever the patient said.
+
+    A message carrying answers to the active topic *and* the one after it must not
+    satisfy both. The second topic would then be marked answered by a message that
+    was never asked for it, skipping a question a clinician wrote and leaving a
+    completed topic with no question behind it in the transcript.
+
+    Two guards produce this and the test covers both: `_merge_slot_values` only
+    accepts slots belonging to the active topic, and `_advance` closes one topic and
+    stops. The answers to the next topic are simply discarded — its question is asked
+    normally on a later turn.
+    """
+    state = engine.start(protocol, GA_CASE)
+    state = engine.record_turn(
+        protocol,
+        state,
+        make_turn(
+            "identity_consent",
+            slot_values=slots(
+                identity_confirmed=True,
+                is_proxy=False,
+                consent_to_continue=True,
+                # Belongs to `open_checkin`, the very next topic.
+                procedure_confirmed=True,
+                patient_reported_concerns="my head hurts",
+            ),
+        ),
+    )
+
+    assert state.active_topic_id == "open_checkin", "advanced exactly one topic"
+    assert len(state.completed) == 1
+    assert "procedure_confirmed" not in state.slot_values
+    assert "patient_reported_concerns" not in state.slot_values
+
+    # And the skipped-ahead answers really are gone: the topic still has to be asked.
+    assert not engine.is_satisfied(
+        protocol.topic("open_checkin"), state, protocol.slot_confidence_threshold
+    )
+
+
 def test_a_partially_answered_topic_stays_active(protocol: Protocol) -> None:
     state = engine.start(protocol, GA_CASE)
     state = engine.record_turn(

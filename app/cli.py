@@ -1,17 +1,23 @@
-"""Drive a check-in from a terminal, with no LLM and no API key.
+"""Drive a check-in from a terminal, with or without an LLM.
 
-Two ways in, for two different questions:
+Ways in, for different questions:
 
     uv run python -m app.cli --list
     uv run python -m app.cli --scenario pdph_spinal   # replay an authored scenario
     uv run python -m app.cli --all                    # replay every scenario
     uv run python -m app.cli --case spinal            # type answers yourself
+    uv run python -m app.cli --case spinal --live     # ...against the real model
 
 Replaying answers "does the deterministic pipeline do the right thing with a known
 extraction?" and is the same code path `tests/test_flows.py` asserts against. The REPL
-answers "what does this feel like, and where does the script go if I say *this*?" — it
-runs on `KeywordTurnEngine`, a credulous keyword matcher, so read its extractions as a
-demonstration of the pipeline rather than of comprehension.
+answers "what does this feel like, and where does the script go if I say *this*?" — by
+default it runs on `KeywordTurnEngine`, a credulous keyword matcher, so read its
+extractions as a demonstration of the pipeline rather than of comprehension.
+
+`--live` swaps in the real Anthropic engine, which needs a key and costs money. It is
+opt-in for both reasons, and because the difference between a real extraction and a
+keyword one must always be visible in the trace rather than inferred — every turn
+prints the model that produced it.
 
 Every turn prints what each layer decided, in the order the pipeline decided it: the
 extraction, the rules that fired and in which band, what the gate did to the drafted
@@ -34,8 +40,11 @@ from app.conversation.scenario import (
     run_scenario,
 )
 from app.conversation.session import Conversation
+from app.config import settings
 from app.domain.enums import AnesthesiaType, BlockType
+from app.llm.client import MissingAPIKey
 from app.llm.fake import KeywordTurnEngine
+from app.llm.turn import TurnEngine
 from app.protocol import engine
 from app.protocol.engine import CaseFacts
 from app.summary.generator import tier_for
@@ -76,6 +85,17 @@ BANDS = {"red": "RED  ", "yellow": "YELLOW", "none": "ok   "}
 
 # --- Rendering --------------------------------------------------------------
 
+# Whose words the patient actually saw. Worth printing every turn: "generated" and
+# "authored by a clinician" carry very different liability, and a transcript that
+# does not distinguish them cannot be reviewed.
+REPLY_SOURCES: dict[str, str] = {
+    "draft": "engine's drafted reply, kept",
+    "transition": "engine's transition into the next topic, kept",
+    "protocol": "protocol YAML — the authored opening question for the topic",
+    "template": "safety/templates.py — fixed clinician-authored escalation copy",
+    "closing": "pipeline constant — the check-in is over",
+}
+
 
 def show_turn(index: int, outcome: TurnOutcome, text: str) -> None:
     """One turn, layer by layer, in pipeline order.
@@ -109,6 +129,7 @@ def show_turn(index: int, outcome: TurnOutcome, text: str) -> None:
         print(f"  green    {len(outcome.reassurance)} approved reassurance line(s) added")
 
     print(f"  betsy    {outcome.reply.content}")
+    print(f"  words    {REPLY_SOURCES[outcome.reply_source]}")
     print(
         f"  state    cursor={outcome.cursor}/{outcome.topic_count}"
         f"  next={outcome.next_topic_id or '—'}"
@@ -222,14 +243,21 @@ def replay_all() -> int:
     return 1 if failed else 0
 
 
-def interactive(case_name: str) -> int:
+def interactive(case_name: str, *, live: bool = False) -> int:
     case = DEMO_CASES.get(case_name)
     if case is None:
         print(f"unknown case {case_name!r}; try {', '.join(DEMO_CASES)}", file=sys.stderr)
         return 2
 
-    pipeline = Pipeline.default(KeywordTurnEngine())
+    try:
+        turn_engine = _live_engine() if live else KeywordTurnEngine()
+    except MissingAPIKey as error:
+        print(error, file=sys.stderr)
+        return 2
+
+    pipeline = Pipeline.default(turn_engine)
     conversation = pipeline.open(case)
+    print(f"engine    {'anthropic ' + settings.turn_model if live else 'keyword double'}")
     queue = ", ".join(conversation.state.topic_queue)
     print(f"case      {case.anesthesia_type.value}"
           f"{'/' + case.block_type.value if case.block_type else ''}"
@@ -256,6 +284,18 @@ def interactive(case_name: str) -> int:
 
     show_summary(conversation, pipeline)
     return 0
+
+
+def _live_engine() -> TurnEngine:
+    """Import the real engine only when asked for it.
+
+    Deferred so the no-key paths — every scenario replay, every test, the keyword
+    REPL — stay runnable and importable on a machine that has never been configured
+    with a credential.
+    """
+    from app.llm.anthropic_engine import AnthropicTurnEngine
+
+    return AnthropicTurnEngine.default()
 
 
 def _command(text: str, conversation: Conversation, pipeline: Pipeline) -> bool:
@@ -300,14 +340,21 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--all", action="store_true", help="replay every scenario")
     group.add_argument("--case", metavar="NAME", help=f"REPL on a demo case: {', '.join(DEMO_CASES)}")
     group.add_argument("--list", action="store_true", help="list scenarios and demo cases")
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="drive --case with the real Anthropic engine (needs a key, costs money)",
+    )
     args = parser.parse_args(argv)
 
+    if args.live and not args.case:
+        parser.error("--live applies to --case; scenario replay is deterministic by design")
     if args.scenario:
         return replay(args.scenario)
     if args.all:
         return replay_all()
     if args.case:
-        return interactive(args.case)
+        return interactive(args.case, live=args.live)
 
     print("scenarios (--scenario ID)")
     for path in sorted(Path(SCENARIOS_DIR).glob("*.yaml")):
