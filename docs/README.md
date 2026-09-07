@@ -40,32 +40,39 @@ below.
 Points where the shipped skeleton and the spec do not yet agree. Each needs a decision, not just
 a rename. Referred to by name elsewhere in these docs, so the names are stable.
 
-**`raw_response` is lossy on exactly the turns it matters most** — *needs a decision; no change
-made.* Invariant 4 says turn analysis is persisted on every turn including the failures, because
-that row is the audit trail and the eval substrate. On the failure path it is currently *thinner*
-than that intends. The turn engine sends its request through the SDK's `messages.parse`, which
-validates the response inside the SDK and raises, so the model's literal JSON never comes back to
-us. What is stored in `raw_response` on a schema failure is Pydantic's report — the failing field
-path and the value it rejected — rather than the payload that produced it.
-
-That is enough to answer "what was wrong with it", and enough for a reviewer to see why the turn
-hard-failed. It is *not* enough to re-score the turn later against a changed schema, or to tell
-whether the model produced something reasonable that a schema bug rejected — which is precisely
-the question a hard failure raises. So the audit row is weakest at the one point where the record
-is least trustworthy, which is the same reasoning that makes a hard failure Tier 1 in the first
-place.
-
-The clean fix is to send the call as `messages.create` with an explicit `output_config` format and
-validate in our own code, holding the raw text either way. That needs the SDK's JSON-schema
-transform to be public API; it is a private module path today, and depending on a private path
-from the module that owns the audit trail was judged the worse of the two trades. Either of two
-things settles it: the transform becoming public, or measuring how often schema failures actually
-occur once the engine runs against a real key — if the answer is "effectively never", the gap
-costs nothing and the current choice stands on its own. Commented at the point it matters in the
-turn engine; the affected column is `turn_analysis.raw_response` in
-[data-model.md](data-model.md).
+None currently open.
 
 ## Resolved divergences
+
+**`raw_response` was lossy on exactly the turns it matters most** — *resolved: the wire module now
+owns the schema, and the turn engine validates the response itself.* Invariant 4 says turn analysis
+is persisted on every turn including the failures, because that row is the audit trail and the eval
+substrate; on the failure path it was *thinner* than that intends. The engine sent its request
+through the SDK's `messages.parse`, which validates inside the SDK and raises, so the model's
+literal JSON never came back. What was stored on a schema failure was Pydantic's report — the
+failing field path and the value it rejected — rather than the payload that produced it. Enough to
+answer "what was wrong with it"; not enough to re-score the turn against a changed schema, or to
+tell whether the model said something reasonable that a schema bug rejected, which is precisely the
+question a hard failure raises.
+
+The fix recorded here as the clean one — send `messages.create` with an explicit `output_config`
+format and validate in our own code — was held back because it appeared to need the SDK's
+JSON-schema transform, a private module path. **That turned out to be the wrong reason to wait, and
+the API forced the issue.** Structured-output schemas are compiled into a decoding grammar under
+budgets the API enforces at request time, and the strictest is on *optional* properties: 24, summed
+across every nesting level. Pydantic marks a field optional whenever it has a default, and every
+field on the wire model and the domain models it embeds has one, so the SDK-derived schema declared
+34 and every live call was rejected — as a bare `Schema is too complex.`, which names neither the
+budget nor the field. So the schema had to be built by hand regardless, and building it by hand
+turned out not to need the SDK's transform at all: what that transform does for us is small enough
+to state directly, and now is, in `_for_grammar`.
+
+The wire module therefore emits every property as **required**, so "nothing to report" is an
+explicit `null`, `[]` or `false` rather than an absent key. That takes the optional count to zero
+and is the better audit record besides — an omission and a stated "no" are otherwise the same row.
+The domain models keep their defaults: they are the persisted format and are constructed partially
+elsewhere, so required-ness belongs to the wire alone. The affected column is
+`turn_analysis.raw_response` in [data-model.md](data-model.md).
 
 **Every GREEN rule was attached to no topic, so the reassurance band could never fire** —
 *resolved: added the five rule references to the topics they belong to.* Rules are evaluated as

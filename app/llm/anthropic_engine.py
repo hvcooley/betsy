@@ -22,7 +22,10 @@ SDK default is non-streaming and that is not an accident here.
 `TurnDraft` the pipeline can persist — invariant 4. Retries are bounded and counted;
 exhausting them returns `hard_failure=True` with no extraction, which
 `app/triage/tiering.py` already reads as Tier 1 because the record is untrustworthy.
-`analyze` raises only for a programming error, never for a bad turn.
+`analyze` raises only for a programming error, never for a bad turn. The model's
+literal response text is held on every one of those paths, valid or not: the request
+carries an explicit schema from `app/llm/wire.py` and validation happens here rather
+than inside the SDK, so nothing is lost on the turns where the record matters most.
 
 **There is no fallback.** If this engine cannot produce an extraction, the
 conversation hard-fails to a human. It never quietly degrades to the keyword double
@@ -43,7 +46,7 @@ from app.config import settings
 from app.llm.client import get_client
 from app.llm.context import render_system, render_turn
 from app.llm.turn import TurnDraft, TurnRequest
-from app.llm.wire import TurnResponse, to_extraction
+from app.llm.wire import TurnResponse, to_extraction, turn_response_schema
 
 # Sent as a follow-up turn when a response did not satisfy the schema. Naming the
 # failing field is what makes the retry worth spending: a bare "try again" gets the
@@ -57,17 +60,12 @@ RETRY_INSTRUCTION = (
 
 # What is persisted as `raw_response` when a response failed to validate.
 #
-# Known limitation, and the one place this module is thinner than invariant 4 would
-# like: `messages.parse` validates inside the SDK and raises, so the model's literal
-# JSON is not returned to us on the failing path — what we hold is Pydantic's report,
-# which names the field and the value it rejected but not the whole payload. Enough
-# to say *what* was wrong; not enough to re-score the turn later against a changed
-# schema, which is exactly the question a hard failure raises.
-#
-# Tracked as an open divergence rather than an accepted design — see "`raw_response`
-# is lossy on exactly the turns it matters most" in docs/README.md for the fix and
-# the two things that would settle it.
-VALIDATION_FAILURE_NOTE = "schema validation failed; payload not recoverable from the SDK\n{errors}"
+# Both halves matter, and the payload is the half that used to be missing. The errors
+# say *what* was wrong; only the literal text the model produced can answer whether it
+# was reasonable and a schema bug rejected it — which is exactly the question a hard
+# failure raises, and the reason a hard failure is Tier 1. Keeping it is what makes
+# the turn re-scorable later against a changed schema.
+VALIDATION_FAILURE_NOTE = "schema validation failed\n{errors}\n\nlast response:\n{raw}"
 
 
 @dataclass
@@ -111,6 +109,7 @@ class AnthropicTurnEngine:
         ]
         started = time.monotonic()
         errors = ""
+        raw = ""
 
         for retries in range(self.max_validation_retries + 1):
             if retries:
@@ -126,12 +125,6 @@ class AnthropicTurnEngine:
                 return self._hard_failure(
                     started, retries, raw=f"{type(error).__name__}: {error}"
                 )
-            except pydantic.ValidationError as error:
-                # `messages.parse` validates inside the SDK and raises, so this is the
-                # ordinary schema-failure path and the response object is lost with
-                # it. Retry with the errors named; the model saw its own answer.
-                errors = _validation_errors(error)
-                continue
 
             if message.stop_reason == "refusal":
                 # A safety classifier declined. Not retryable by definition, and not
@@ -141,25 +134,39 @@ class AnthropicTurnEngine:
                     started, retries, raw="refusal", model=message.model
                 )
 
-            payload = _payload(message)
-            if payload is not None:
-                return self._draft(payload, request, message, started, retries)
+            text = _response_text(message)
+            if text is not None:
+                raw = text
 
-            # Validated nothing and raised nothing: a response with no text block at
-            # all. Truncation at `max_tokens` is the usual cause.
-            errors = _no_payload_reason(message)
+            if text is None or message.stop_reason == "max_tokens":
+                # Either no text block at all, or one the model never finished. Both
+                # are worth naming as themselves: a truncated payload fails to parse,
+                # and telling the model its JSON was malformed would send it looking
+                # for a mistake it did not make.
+                errors = _no_payload_reason(message)
+                continue
+
+            try:
+                payload = TurnResponse.model_validate_json(raw)
+            except pydantic.ValidationError as error:
+                # The ordinary schema-failure path. Retry with the errors named; the
+                # model saw its own answer, so a bare "try again" gets it back.
+                errors = _validation_errors(error)
+                continue
+
+            return self._draft(payload, request, message, started, retries, raw)
 
         return self._hard_failure(
             started,
             self.max_validation_retries,
-            raw=VALIDATION_FAILURE_NOTE.format(errors=errors),
+            raw=VALIDATION_FAILURE_NOTE.format(errors=errors, raw=raw or "(none returned)"),
         )
 
     # --- The call -----------------------------------------------------------
 
     def _call(
         self, system: str, conversation: list[anthropic.types.MessageParam]
-    ) -> anthropic.types.ParsedMessage[TurnResponse]:
+    ) -> anthropic.types.Message:
         """One request. Non-streaming, deliberately — see the module docstring.
 
         The system block carries the cache breakpoint: it is byte-identical on every
@@ -168,8 +175,14 @@ class AnthropicTurnEngine:
         after the breakpoint. Adding anything per-conversation to the system block
         would silently cost that on every call — `usage.cache_read_input_tokens` is
         the number to watch.
+
+        `create` with an explicit schema rather than `parse` with a Pydantic class:
+        the schema is `app/llm/wire.py`'s to state, and validating the response here
+        instead of inside the SDK is what keeps the model's literal text on the
+        failing paths. The schema is constant across turns, so it caches alongside
+        the system block rather than against it.
         """
-        return self.client.messages.parse(
+        return self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
             system=[
@@ -180,8 +193,10 @@ class AnthropicTurnEngine:
                 }
             ],
             messages=conversation,
-            output_format=TurnResponse,
-            output_config={"effort": self.effort},
+            output_config={
+                "effort": self.effort,
+                "format": {"type": "json_schema", "schema": turn_response_schema()},
+            },
             thinking={"type": "adaptive"},
         )
 
@@ -191,11 +206,17 @@ class AnthropicTurnEngine:
         self,
         payload: TurnResponse,
         request: TurnRequest,
-        message: anthropic.types.ParsedMessage[TurnResponse],
+        message: anthropic.types.Message,
         started: float,
         retries: int,
+        raw: str,
     ) -> TurnDraft:
-        """A validated response. Provenance is stamped here, not by the model."""
+        """A validated response. Provenance is stamped here, not by the model.
+
+        `raw_response` is the text the model actually produced, not a re-dump of the
+        parsed object: the two differ wherever a validator normalized something, and
+        the audit trail wants what was said.
+        """
         return TurnDraft(
             extraction=to_extraction(payload, request),
             draft_reply=payload.draft_reply,
@@ -205,7 +226,7 @@ class AnthropicTurnEngine:
             latency_ms=_elapsed_ms(started),
             input_tokens=message.usage.input_tokens,
             output_tokens=message.usage.output_tokens,
-            raw_response=payload.model_dump_json(),
+            raw_response=raw,
         )
 
     def _hard_failure(
@@ -231,13 +252,14 @@ class AnthropicTurnEngine:
 # --- Response reading -------------------------------------------------------
 
 
-def _payload(message: anthropic.types.ParsedMessage[TurnResponse]) -> TurnResponse | None:
-    """The validated object, or None if no content block carried one."""
-    for block in message.content:
-        parsed = getattr(block, "parsed_output", None)
-        if isinstance(parsed, TurnResponse):
-            return parsed
-    return None
+def _response_text(message: anthropic.types.Message) -> str | None:
+    """The structured output as the model wrote it, or None if it wrote none.
+
+    Only text blocks. An adaptive-thinking response also carries thinking blocks, and
+    those are reasoning about the answer rather than the answer.
+    """
+    text = "".join(block.text for block in message.content if block.type == "text")
+    return text or None
 
 
 def _validation_errors(error: pydantic.ValidationError) -> str:
@@ -252,8 +274,8 @@ def _validation_errors(error: pydantic.ValidationError) -> str:
     )
 
 
-def _no_payload_reason(message: anthropic.types.ParsedMessage[TurnResponse]) -> str:
-    """Why a response that raised nothing still carried no structured output."""
+def _no_payload_reason(message: anthropic.types.Message) -> str:
+    """Why a response carried no usable structured output, before parsing was tried."""
     if message.stop_reason == "max_tokens":
         return "the response was cut off at max_tokens before it was complete"
     return f"the response contained no structured output (stop_reason={message.stop_reason})"

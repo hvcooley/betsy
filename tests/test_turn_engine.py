@@ -39,6 +39,7 @@ from app.llm.context import (
     render_system,
     render_turn,
 )
+from app.llm import wire
 from app.llm.turn import TurnDraft, TurnEngine, TurnRequest
 from app.llm.wire import SlotAnswer, TurnResponse, to_extraction
 from app.protocol import engine
@@ -85,14 +86,24 @@ class _Usage:
 class _Block:
     type = "text"
 
-    def __init__(self, parsed: TurnResponse | None, text: str = "{}") -> None:
-        self.parsed_output = parsed
+    def __init__(self, text: str) -> None:
         self.text = text
 
 
+class _ThinkingBlock:
+    type = "thinking"
+    thinking = "the patient gave a name and a date of birth"
+
+
 class _Message:
-    def __init__(self, parsed: TurnResponse | None, stop_reason: str = "end_turn") -> None:
-        self.content = [_Block(parsed)] if parsed is not None else []
+    """A response as the engine now reads it: text blocks, parsed by our code.
+
+    The thinking block is not decoration — an adaptive-thinking response really does
+    carry one, and `_response_text` has to skip it rather than splice it into the JSON.
+    """
+
+    def __init__(self, text: str | None, stop_reason: str = "end_turn") -> None:
+        self.content = [_ThinkingBlock()] + ([_Block(text)] if text is not None else [])
         self.model = "claude-sonnet-5"
         self.stop_reason = stop_reason
         self.usage = _Usage()
@@ -101,17 +112,18 @@ class _Message:
 class StubMessages:
     """Stands in for `client.messages`. Records every call and replays outcomes.
 
-    `stream` and `create` raise rather than returning: a patient-facing reply may
-    never be streamed — the safety gate has to be able to discard it — so an engine
-    reaching for either is a bug this stub should surface loudly rather than a
-    difference in style.
+    `stream` and `parse` raise rather than returning. Streaming is invariant 2 — a
+    patient-facing reply may never be streamed, because the safety gate has to be able
+    to discard it. `parse` is the one this module deliberately moved off: it validates
+    inside the SDK and raises, which loses the model's literal text on exactly the
+    turns the audit trail needs it. Either is a bug worth surfacing loudly.
     """
 
     def __init__(self, outcomes: list[object]) -> None:
         self.outcomes = outcomes
         self.calls: list[dict[str, object]] = []
 
-    def parse(self, **kwargs: object) -> object:
+    def create(self, **kwargs: object) -> object:
         self.calls.append(kwargs)
         outcome = self.outcomes[min(len(self.calls) - 1, len(self.outcomes) - 1)]
         if isinstance(outcome, Exception):
@@ -121,8 +133,8 @@ class StubMessages:
     def stream(self, **kwargs: object) -> object:
         raise AssertionError("patient-facing replies are never streamed (invariant 2)")
 
-    def create(self, **kwargs: object) -> object:
-        raise AssertionError("the engine must go through the validated `parse` path")
+    def parse(self, **kwargs: object) -> object:
+        raise AssertionError("the engine validates here, so the raw text survives a failure")
 
 
 class StubClient:
@@ -134,16 +146,18 @@ def make_engine(outcomes: list[object]) -> AnthropicTurnEngine:
     return AnthropicTurnEngine(client=StubClient(outcomes))  # type: ignore[arg-type]
 
 
-def validation_error() -> pydantic.ValidationError:
-    try:
-        TurnResponse.model_validate_json('{"extraction_confidence": 7}')
-    except pydantic.ValidationError as error:
-        return error
-    raise AssertionError("expected that payload to be rejected")
-
-
 def response(**kwargs: object) -> TurnResponse:
     return TurnResponse.model_validate({"draft_reply": "Thanks.", **kwargs})
+
+
+def ok(**kwargs: object) -> _Message:
+    """A response the schema accepts, as the model would have written it."""
+    return _Message(response(**kwargs).model_dump_json())
+
+
+def rejected() -> _Message:
+    """A response the schema rejects — `extraction_confidence` is a 0-to-1 float."""
+    return _Message('{"extraction_confidence": 7}')
 
 
 # --- The interface -----------------------------------------------------------
@@ -151,7 +165,7 @@ def response(**kwargs: object) -> TurnResponse:
 
 def test_the_real_engine_satisfies_the_same_protocol_as_the_doubles() -> None:
     """The seam is only worth having if both sides really fit it."""
-    assert isinstance(make_engine([_Message(response())]), TurnEngine)
+    assert isinstance(make_engine([ok()]), TurnEngine)
 
 
 def test_a_missing_key_fails_at_construction_not_mid_conversation() -> None:
@@ -271,8 +285,8 @@ def test_an_integral_json_number_is_narrowed_for_an_int_slot(protocol: Protocol)
 def test_a_valid_response_becomes_a_draft_with_both_replies(
     request_: TurnRequest,
 ) -> None:
-    payload = response(draft_reply="And your date of birth?", draft_transition_reply="Thanks. Next —")
-    draft = make_engine([_Message(payload)]).analyze(request_)
+    message = ok(draft_reply="And your date of birth?", draft_transition_reply="Thanks. Next —")
+    draft = make_engine([message]).analyze(request_)
 
     assert not draft.hard_failure
     assert draft.validation_retries == 0
@@ -285,7 +299,7 @@ def test_a_valid_response_becomes_a_draft_with_both_replies(
 
 
 def test_a_schema_failure_is_retried_and_the_retry_counted(request_: TurnRequest) -> None:
-    engine_ = make_engine([validation_error(), _Message(response())])
+    engine_ = make_engine([rejected(), ok()])
     draft = engine_.analyze(request_)
 
     assert not draft.hard_failure
@@ -297,7 +311,7 @@ def test_the_retry_names_the_failing_fields_back_to_the_model(
     request_: TurnRequest,
 ) -> None:
     """A bare 'try again' gets the same answer back."""
-    engine_ = make_engine([validation_error(), _Message(response())])
+    engine_ = make_engine([rejected(), ok()])
     engine_.analyze(request_)
 
     retry = engine_.client.messages.calls[1]["messages"][-1]  # type: ignore[attr-defined,index]
@@ -312,7 +326,7 @@ def test_exhausting_the_ladder_is_a_recorded_hard_failure(request_: TurnRequest)
     a row rather than an exception. `app/triage/tiering.py` reads `hard_failure` as
     Tier 1 on its own, because a record nobody can trust is its own kind of urgent.
     """
-    engine_ = make_engine([validation_error()])
+    engine_ = make_engine([rejected()])
     draft = engine_.analyze(request_)
 
     assert draft.hard_failure
@@ -320,6 +334,23 @@ def test_exhausting_the_ladder_is_a_recorded_hard_failure(request_: TurnRequest)
     assert draft.validation_retries == 2
     assert len(engine_.client.messages.calls) == 3  # type: ignore[attr-defined]
     assert draft.raw_response and "extraction_confidence" in draft.raw_response
+
+
+def test_the_rejected_payload_is_kept_verbatim_on_the_hard_failure(
+    request_: TurnRequest,
+) -> None:
+    """The audit row has to hold what the model actually said, not just the complaint.
+
+    The errors alone answer "what was wrong with it". Only the literal text answers
+    "was it reasonable, and did a schema bug reject it?" — which is the question a
+    hard failure raises, and the reason a hard failure is Tier 1. Validating in our
+    own code rather than inside the SDK is what makes this recoverable.
+    """
+    draft = make_engine([rejected()]).analyze(request_)
+
+    assert draft.raw_response is not None
+    assert '{"extraction_confidence": 7}' in draft.raw_response
+    assert "less than or equal to 1" in draft.raw_response
 
 
 def test_a_transport_failure_hard_fails_without_burning_the_ladder(
@@ -359,15 +390,134 @@ def test_a_truncated_response_is_retried_then_hard_fails(request_: TurnRequest) 
     assert "max_tokens" in (draft.raw_response or "")
 
 
+def test_a_half_written_payload_is_called_truncated_not_malformed(
+    request_: TurnRequest,
+) -> None:
+    """A real truncation stops mid-token, so there *is* text — it just stops.
+
+    Handing that to the parser and reporting what it says would tell the model its
+    JSON was malformed, sending it to look for a mistake it did not make. The partial
+    text is still kept on the record; only the retry is worded from `stop_reason`.
+    """
+    engine_ = make_engine([_Message('{"draft_reply": "And your da', stop_reason="max_tokens")])
+    draft = engine_.analyze(request_)
+
+    retry = engine_.client.messages.calls[1]["messages"][-1]  # type: ignore[attr-defined,index]
+    assert "max_tokens" in retry["content"]
+    assert "And your da" in (draft.raw_response or "")
+
+
 def test_a_hard_failure_proposes_no_words_of_its_own(request_: TurnRequest) -> None:
     """On the turn the engine has just proved untrustworthy, it writes nothing.
 
     The pipeline falls back to the protocol's clinician-authored question.
     """
-    draft = make_engine([validation_error()]).analyze(request_)
+    draft = make_engine([rejected()]).analyze(request_)
 
     assert draft.draft_reply == ""
     assert draft.transition_reply == ""
+
+
+# --- The wire schema ---------------------------------------------------------
+#
+# The API compiles a structured-output schema into a decoding grammar and rejects
+# anything over its budgets. It does so at request time, with a message
+# (`Schema is too complex.`) that names neither the budget nor the field that spent
+# it, and only against a real key — so nothing else in this suite would notice. These
+# tests are the local statement of those limits.
+
+# Optional properties are the expensive kind, counted across every nesting level at
+# once. Measured against the API, not documented by it.
+MAX_OPTIONAL_PROPERTIES = 24
+
+
+def _objects(node: object) -> list[dict]:
+    """Every object node in a schema, `$defs` and `anyOf` branches included."""
+    if isinstance(node, list):
+        return [found for item in node for found in _objects(item)]
+    if not isinstance(node, dict):
+        return []
+    here = [node] if node.get("type") == "object" and "properties" in node else []
+    return here + [found for value in node.values() for found in _objects(value)]
+
+
+def _keys(node: object) -> list[str]:
+    """Every schema keyword used anywhere, skipping the names of declared properties."""
+    if isinstance(node, list):
+        return [found for item in node for found in _keys(item)]
+    if not isinstance(node, dict):
+        return []
+    found = []
+    for key, value in node.items():
+        if key in ("properties", "$defs"):
+            found += [k for v in value.values() for k in _keys(v)]
+            continue
+        found.append(key)
+        found += _keys(value)
+    return found
+
+
+def test_the_wire_schema_spends_none_of_the_optional_property_budget() -> None:
+    """Every property required, so "nothing to report" is a stated null, not silence.
+
+    Pydantic marks a field optional whenever it has a default, and every field on
+    `TurnResponse` and on the domain models it embeds has one — which is how the
+    derived schema came to declare 34 against a ceiling of 24 and get rejected
+    outright. Holding this at zero is what stops a new nullable field from silently
+    spending a budget nobody can see.
+    """
+    optional = [
+        (name, key)
+        for node in _objects(wire.turn_response_schema())
+        for name in [node.get("title", "?")]
+        for key in node["properties"]
+        if key not in node.get("required", [])
+    ]
+
+    assert not optional, f"optional properties on the wire: {optional}"
+    assert len(optional) <= MAX_OPTIONAL_PROPERTIES
+
+
+def test_every_object_in_the_wire_schema_is_closed() -> None:
+    """`additionalProperties: false` everywhere — the API requires it, and it is also
+    what makes a forged provenance field a validation error rather than a stray key."""
+    unclosed = [
+        node.get("title", "?")
+        for node in _objects(wire.turn_response_schema())
+        if node.get("additionalProperties") is not False
+    ]
+
+    assert not unclosed, f"objects the model could add keys to: {unclosed}"
+
+
+def test_a_bound_the_grammar_cannot_enforce_is_stated_rather_than_sent() -> None:
+    """The compiler rejects `minimum`/`maximum` outright, so they cannot just be sent.
+
+    Dropping them silently would be worse than the 400: `PainReport.score` is a 0-10
+    scale, and a model told nothing about the range will eventually write 47. They
+    move onto `description`, where they are guidance the model reads and `accepts()`
+    still enforces on the way in.
+    """
+    schema = wire.turn_response_schema()
+    pain = schema["$defs"]["PainReport"]["properties"]["score"]
+
+    sent = [key for key in _keys(schema) if key in wire._UNENFORCEABLE or key == "default"]
+    assert not sent, f"keywords the grammar compiler rejects: {sorted(set(sent))}"
+    assert "minimum: 0" in pain["anyOf"][0]["description"]
+    assert "maximum: 10" in pain["anyOf"][0]["description"]
+    assert "Current 0-10 pain score." in pain["description"]
+
+
+def test_the_request_carries_the_schema_this_module_owns(request_: TurnRequest) -> None:
+    """Not a Pydantic class handed to the SDK to derive one from."""
+    engine_ = make_engine([ok()])
+    engine_.analyze(request_)
+    output_config = engine_.client.messages.calls[0]["output_config"]  # type: ignore[attr-defined,index]
+
+    assert output_config["format"] == {  # type: ignore[index]
+        "type": "json_schema",
+        "schema": wire.turn_response_schema(),
+    }
 
 
 # --- The request itself ------------------------------------------------------
@@ -375,7 +525,7 @@ def test_a_hard_failure_proposes_no_words_of_its_own(request_: TurnRequest) -> N
 
 def test_the_system_block_carries_the_cache_breakpoint(request_: TurnRequest) -> None:
     """It is byte-identical on every turn, so it is the only thing worth caching."""
-    engine_ = make_engine([_Message(response())])
+    engine_ = make_engine([ok()])
     engine_.analyze(request_)
     call = engine_.client.messages.calls[0]  # type: ignore[attr-defined]
 
@@ -395,7 +545,7 @@ def test_the_system_prompt_does_not_vary_between_turns(protocol: Protocol) -> No
 
 
 def test_the_last_message_is_the_patient_turn(request_: TurnRequest) -> None:
-    engine_ = make_engine([_Message(response())])
+    engine_ = make_engine([ok()])
     engine_.analyze(request_)
     messages = engine_.client.messages.calls[0]["messages"]  # type: ignore[attr-defined,index]
 
@@ -518,5 +668,5 @@ def _code(path: Path) -> str:
 
 def test_a_hard_failure_is_a_draft_not_an_exception(request_: TurnRequest) -> None:
     """Every exit from `analyze` is something the pipeline can persist."""
-    for outcome in ([validation_error()], [anthropic.APIConnectionError(request=None)]):  # type: ignore[arg-type]
+    for outcome in ([rejected()], [anthropic.APIConnectionError(request=None)]):  # type: ignore[arg-type]
         assert isinstance(make_engine(outcome).analyze(request_), TurnDraft)
