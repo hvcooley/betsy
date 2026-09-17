@@ -36,8 +36,32 @@ turn, so the active topic's slots appear as named, correctly typed properties an
 model cannot express a wrong-typed answer in the first place. That keeps the YAML
 authoritative without flattening everything to one union, at the cost of building a
 schema per topic and losing a single cacheable schema across turns. The seam for it
-is `slot_answers_schema()` below, which is where that generation would land; nothing
+is `turn_response_schema()` below, which is where that generation would land; nothing
 outside this module knows the schema is static.
+
+### This module owns the wire schema, not the SDK
+
+`turn_response_schema()` is what goes on the request, and `app/llm/anthropic_engine.py`
+sends it explicitly rather than handing the SDK a Pydantic class and letting it derive
+one. Two reasons, and the second is why the first was worth acting on.
+
+The API compiles a structured-output schema into a decoding grammar and enforces
+budgets on it. **Optional properties are the expensive ones**, and the ceiling is 24
+counted across every nesting level at once. Pydantic marks a field optional whenever
+it has a default, and every field here and on the domain models has one, so the
+derived schema declared 34 and the API rejected the request outright — as a bare
+`Schema is too complex.`, since the specific message is suppressed while the schema
+still carries `$defs`. `_for_grammar` fixes that at the root: on the wire every
+property is **required**, and "nothing to report" is an explicit `null`, `[]` or
+`false` rather than an absent key. That is a better audit record anyway — a silent
+omission and a stated "no" are the same row otherwise — and it takes the count to
+zero, so the budget stops being something a new nullable field can silently spend.
+
+The domain models in `app/domain/schemas.py` keep their defaults. They are the
+persisted format and are constructed partially elsewhere (`TurnExtraction.symptom`
+returns a bare `SymptomObservation`, `TurnExtraction.slot` a bare `SlotValue`), so
+required-ness belongs to the wire and not to them. `_for_grammar` is the one place
+the two views differ.
 """
 
 from __future__ import annotations
@@ -119,14 +143,69 @@ class TurnResponse(BaseModel):
     )
 
 
-def slot_answers_schema() -> dict[str, Any]:
-    """The JSON schema fragment describing `slot_answers`.
+# JSON Schema keywords the structured-output grammar compiler does not accept. Each
+# is kept as text on `description` rather than dropped outright, so a bound the domain
+# model declares still reaches the model as guidance even though nothing enforces it
+# during decoding — `PainReport.score` says 0-10, and the model should be told so.
+_UNENFORCEABLE = (
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+)
 
-    Exposed as a function, and only used for the prompt's schema notes, so that the
-    move to per-topic generated schemas described in the module docstring has one
-    place to happen rather than being spread through the engine.
+# Dropped without trace. Every property is required on the wire, so a `default` is
+# not merely unenforceable but actively misleading: there is no absent key for it to
+# fill in, and telling the model a field defaults to null invites it to say nothing
+# where the whole point is to make it say `null` out loud.
+_DISCARDED = (*_UNENFORCEABLE, "default")
+
+
+def turn_response_schema() -> dict[str, Any]:
+    """The JSON schema sent with every turn call.
+
+    Built here rather than derived by the SDK from `TurnResponse` — see the module
+    docstring for why the derived one is rejected by the API. This is also the seam
+    for per-topic slot schemas: that change happens inside this function, and the
+    engine keeps calling it unchanged.
     """
-    return TurnResponse.model_json_schema()["properties"]["slot_answers"]
+    return _for_grammar(TurnResponse.model_json_schema())
+
+
+def slot_answers_schema() -> dict[str, Any]:
+    """The JSON schema fragment describing `slot_answers`, as actually sent."""
+    return turn_response_schema()["properties"]["slot_answers"]
+
+
+def _for_grammar(node: Any) -> Any:
+    """One schema node, rewritten into what the decoding grammar will accept.
+
+    Recursive over `$defs` and `anyOf` alike, so a nested model is treated exactly
+    like the root: everything it declares is required, and nothing it declares that
+    the compiler rejects survives to be sent.
+    """
+    if isinstance(node, list):
+        return [_for_grammar(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+
+    schema = {key: _for_grammar(value) for key, value in node.items() if key not in _DISCARDED}
+    unenforceable = {key: node[key] for key in _UNENFORCEABLE if key in node}
+    if unenforceable:
+        stated = ", ".join(f"{key}: {value}" for key, value in unenforceable.items())
+        described = node.get("description")
+        schema["description"] = f"{described} ({stated})" if described else stated
+    if schema.get("type") == "object" and "properties" in schema:
+        schema["required"] = list(schema["properties"])
+        schema["additionalProperties"] = False
+    return schema
 
 
 def to_extraction(response: TurnResponse, request: TurnRequest) -> TurnExtraction:

@@ -78,9 +78,17 @@ safety-critical decisions never depend solely on model output:
   replies — the ordinary next question, and a transition used only if the turn closed the topic).
   `anthropic_engine.py` is the real implementation: one non-streaming structured-output call per
   turn, the ≤2-retry validation ladder, and a recorded hard failure rather than an exception when
-  it is exhausted. `wire.py` is the response schema the model may return — deliberately not
-  `TurnExtraction`, since provenance is stamped by the caller — plus the adapter back, which puts
-  every slot answer through `Slot.accepts()`. `context.py` renders the prompts and generates the
+  it is exhausted. It sends `messages.create` with an explicit schema and validates the response
+  itself rather than using `messages.parse`, so the model's literal text survives on the failing
+  paths. `wire.py` is the response schema the model may return — deliberately not `TurnExtraction`,
+  since provenance is stamped by the caller — plus the adapter back, which puts every slot answer
+  through `Slot.accepts()`. It also *owns* the JSON schema that goes on the wire
+  (`turn_response_schema()`): the API compiles it into a decoding grammar under budgets it enforces
+  at request time, the strictest being 24 optional properties summed across all nesting levels, so
+  every property is emitted as **required** and "nothing to report" is a stated `null`/`[]`/`false`.
+  The domain models in `app/domain/schemas.py` keep their defaults — required-ness is the wire's,
+  not the persisted format's. A test holds the optional count at zero, because the API reports a
+  breach only at request time and only as `Schema is too complex.` `context.py` renders the prompts and generates the
   closed vocabularies from `app/domain/enums.py` so they cannot drift. `client.py` constructs the
   SDK client; `prompts/*.md` are versioned templates (`system_v1.md`, `turn_v1.md`,
   `summary_v1.md`) matched to protocol/rules versions — `system_v1.md` is the cached prefix and

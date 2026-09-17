@@ -75,10 +75,12 @@ Step 2 is deliberately a **single** call rather than separate extract-then-gener
 halves latency and cost, and safety is unaffected because step 5 can always throw the draft away.
 
 Step 3 is non-negotiable — the turn-analysis rows are the audit trail and the substrate the eval
-harness scores against. Persist them even when validation failed. The row written on a *failed*
-turn does not currently carry the model's literal response, only the reason it was rejected; that
-is a known gap against this step rather than an accepted design — see "`raw_response` is lossy on
-exactly the turns it matters most" in [README.md](README.md).
+harness scores against. Persist them even when validation failed, and hold the model's literal
+response text on every path, valid or not: on a failed turn the reason it was rejected answers
+*what* was wrong, but only the payload answers whether the model said something reasonable that a
+schema bug threw away. That requires the request to carry an explicit output schema and the
+validation to happen in our own code rather than inside the SDK, which is also what keeps the
+schema within the API's grammar-compilation budgets.
 
 ### Step 2 is an interface, and the model is one implementation of it
 

@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Betsy: live case (general)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "app.cli",
+            "args": ["--case", "general", "--live"],
+            "console": "integratedTerminal",
+            "envFile": "${workspaceFolder}/.env",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python3",
+            "justMyCode": true
+        }
+    ]
+}
